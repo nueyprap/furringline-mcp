@@ -1,0 +1,10 @@
+{
+  "name": "furringline",
+  "description": "FURRINGLINE building-materials catalog and material calculators (Thailand): product search, prices before VAT, live stock, quantities for ceilings, walls and insulation. Read-only, no sign-in.",
+  "version": "1.0.0",
+  "author": { "name": "FURRINGLINE (Furring Line Quality Co., Ltd.)", "email": "hello@furringline.com", "url": "https://furringline.com" },
+  "homepage": "https://mcp.furringline.com/docs",
+  "repository": "https://github.com/nueyprap/furringline-mcp",
+  "license": "MIT",
+  "keywords": ["building-materials", "gypsum", "ceiling", "construction", "thailand"]
+}

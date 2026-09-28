@@ -1,0 +1,11 @@
+{
+  "name": "furringline",
+  "version": "1.0.0",
+  "description": "FURRINGLINE building-materials catalog and material calculators (Thailand). Read-only, no sign-in.",
+  "contextFileName": "GEMINI.md",
+  "mcpServers": {
+    "furringline": {
+      "httpUrl": "https://mcp.furringline.com"
+    }
+  }
+}

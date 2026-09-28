@@ -1,0 +1,11 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "com.furringline.mcp/furringline",
+  "title": "FURRINGLINE",
+  "description": "Thai building materials: product search, prices before VAT, stock and material calculators.",
+  "version": "1.0.0",
+  "websiteUrl": "https://mcp.furringline.com/docs",
+  "repository": { "url": "https://github.com/nueyprap/furringline-mcp", "source": "github" },
+  "icons": [{ "src": "https://mcp.furringline.com/icon-512.png", "mimeType": "image/png", "sizes": ["512x512"] }],
+  "remotes": [{ "type": "streamable-http", "url": "https://mcp.furringline.com" }]
+}
