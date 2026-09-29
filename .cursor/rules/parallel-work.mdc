@@ -1,0 +1,5 @@
+---
+description: Parallel-work reminder
+alwaysApply: true
+---
+Multi-step task (build, design, research, setup)? Load the parallel-work skill first, list the workstreams, and run independent ones in parallel with subagents.  The skill lives in github.com/nueyprap/nuey-skills at .agents/skills/parallel-work/SKILL.md; if it is not installed, still list the workstreams and run independent ones in parallel.

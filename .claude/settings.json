@@ -1,0 +1,14 @@
+{
+  "hooks": {
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "echo '{\"hookSpecificOutput\":{\"hookEventName\":\"UserPromptSubmit\",\"additionalContext\":\"Multi-step task (build, design, research, setup)? Load the parallel-work skill first, list the workstreams, and run independent ones in parallel with subagents.\"}}'"
+          }
+        ]
+      }
+    ]
+  }
+}
