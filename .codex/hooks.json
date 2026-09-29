@@ -5,7 +5,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "printf '%s' '{\"hookSpecificOutput\":{\"hookEventName\":\"UserPromptSubmit\",\"additionalContext\":\"Multi-step task (build, design, research, setup)? Load the parallel-work skill first, list the workstreams, and run independent ones in parallel with subagents.\"}}'",
+            "command": "grep -qs 'parallel-work skill first' \"$HOME/.codex/hooks.json\" || printf '%s' '{\"hookSpecificOutput\":{\"hookEventName\":\"UserPromptSubmit\",\"additionalContext\":\"Multi-step task (build, design, research, setup)? Load the parallel-work skill first, list the workstreams, and run independent ones in parallel with subagents.\"}}'",
             "timeout": 5
           }
         ]
