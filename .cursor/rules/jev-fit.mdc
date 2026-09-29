@@ -1,0 +1,9 @@
+---
+description: Jev-fit reminder
+alwaysApply: true
+---
+Planning, designing or building something, or changing a workflow? Load the jev-fit skill: find where Jev (TypeSafe) judgments could help, then decide use, not now, or no, with a reason.
+
+Jev is TypeSafe's System One model: fast typed judgments (Choice, Noul, Score) for routing, ranking, extraction, verification. Use when semantic judgment helps; code keeps rules and execution.
+
+The skill is at .agents/skills/jev-fit/SKILL.md in nueyprap/nuey-skills.
