@@ -8,6 +8,14 @@
             "command": "echo '{\"hookSpecificOutput\":{\"hookEventName\":\"UserPromptSubmit\",\"additionalContext\":\"Multi-step task (build, design, research, setup)? Load the parallel-work skill first, list the workstreams, and run independent ones in parallel with subagents.\"}}'"
           }
         ]
+      },
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "echo '{\"hookSpecificOutput\":{\"hookEventName\":\"UserPromptSubmit\",\"additionalContext\":\"Planning, designing or building something, or changing a workflow? Load the jev-fit skill: find where Jev (TypeSafe) judgments could help, then decide use, not now, or no, with a reason.\"}}'"
+          }
+        ]
       }
     ]
   }
