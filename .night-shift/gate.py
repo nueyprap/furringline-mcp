@@ -40,7 +40,7 @@ import time
 import tomllib
 from pathlib import Path
 
-VERSION = "0.1.0"
+VERSION = "0.1.1"
 
 DEFAULT_PROTECTED = [
     ".github/**", ".night-shift/**", ".jev/**", ".githooks/**", ".claude/**", ".codex/**",
@@ -109,9 +109,10 @@ class Gate:
             argv, kw = ["sh", "-c", cmd], {"cwd": cwd, "env": {**env, "CI": "true", "NIGHT_SHIFT_GATE": "1"},
                                            "start_new_session": True}
         try:
-            p = subprocess.run(argv, capture_output=True, text=True, encoding="utf-8", errors="replace",
-                               timeout=timeout, **kw)
-            return p.returncode, (p.stdout + p.stderr)[-6000:], time.time() - t
+            # one stream, in order, and the full text: the passed-count line can sit far from the end
+            p = subprocess.run(argv, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+                               encoding="utf-8", errors="replace", timeout=timeout, **kw)
+            return p.returncode, p.stdout, time.time() - t
         except subprocess.TimeoutExpired as e:
             out = e.stdout.decode("utf-8", "replace") if isinstance(e.stdout, bytes) else (e.stdout or "")
             if box:
