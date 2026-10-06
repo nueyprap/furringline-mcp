@@ -1,0 +1,131 @@
+name: night-shift-merge
+# Night Shift trusted gate + merge. Runs from the default branch only (workflow_run and
+# workflow_dispatch), with the default branch's .night-shift/gate.py and config.toml.
+# verify: runs the agent's code with a read-only token and no secrets.
+# merge/reject: never runs branch code; merges, deploys, reverts, logs, alerts.
+# Installed by nuey-skills/scripts/night-shift/install.py; do not edit here.
+on:
+  workflow_run:
+    workflows: [night-shift-ci]
+    types: [completed]
+  workflow_dispatch:
+    inputs:
+      branch:
+        description: night-shift/* branch to gate again (ignored for a selftest)
+        required: false
+        default: ''
+      selftest:
+        description: only run the config's setup, checks and tests on the default branch (no merge)
+        type: boolean
+        default: false
+permissions: {}
+concurrency:
+  group: night-shift-merge-${{ github.event.workflow_run.head_branch || inputs.branch || 'selftest' }}
+  cancel-in-progress: false
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    permissions:
+      contents: read
+    outputs:
+      verdict: ${{ steps.gate.outputs.verdict }}
+      branch: ${{ steps.refs.outputs.branch }}
+      head: ${{ steps.gate.outputs.head }}
+      base: ${{ steps.gate.outputs.base }}
+    steps:
+      - name: Resolve branch
+        id: refs
+        env:
+          BR: ${{ github.event.workflow_run.head_branch || inputs.branch }}
+          SELFTEST: ${{ inputs.selftest }}
+        run: |
+          if [ "$SELFTEST" = true ]; then echo "branch=selftest" >> "$GITHUB_OUTPUT"; exit 0; fi
+          case "$BR" in night-shift/*) ;; *) echo "not a night-shift branch: $BR"; exit 1 ;; esac
+          echo "branch=$BR" >> "$GITHUB_OUTPUT"
+      - uses: actions/checkout@v4
+        with:
+          path: trusted
+          ref: ${{ github.event.repository.default_branch }}
+          persist-credentials: false
+      - uses: actions/checkout@v4
+        with:
+          path: work
+          ref: ${{ github.event.repository.default_branch }}
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: corepack enable
+      - name: Gate
+        id: gate
+        env:
+          BR: ${{ steps.refs.outputs.branch }}
+          RUN_SHA: ${{ github.event.workflow_run.head_sha }}
+          NIGHT_SHIFT_SANDBOX: docker
+          DEFAULT: ${{ github.event.repository.default_branch }}
+          SELFTEST: ${{ inputs.selftest }}
+        run: |
+          cd work
+          if [ "$SELFTEST" = true ]; then
+            git config --local --unset-all http.https://github.com/.extraheader || true
+            set +e
+            python3 ../trusted/.night-shift/gate.py --repo . --base HEAD --head HEAD --selftest \
+              --config ../trusted/.night-shift/config.toml --out ../verdict.json --summary ../summary.md
+            code=$?; set -e
+            cat ../summary.md >> "$GITHUB_STEP_SUMMARY"; echo "verdict=selftest" >> "$GITHUB_OUTPUT"; exit $code
+          fi
+          git fetch -q origin "+refs/heads/$BR:refs/remotes/origin/$BR" || { echo "branch $BR is gone"; echo "verdict=gone" >> "$GITHUB_OUTPUT"; exit 0; }
+          # branch code runs next: remove the (read-only) token from the checkout first
+          git config --local --unset-all http.https://github.com/.extraheader || true
+          for k in $(git config --local --name-only --get-regexp '^includeif\.' || true); do git config --local --unset-all "$k"; done
+          git config --local --get-regexp 'extraheader|includeif' && { echo "token still present"; exit 1; } || true
+          HEAD=$(git rev-parse "origin/$BR"); BASE=$(git rev-parse "origin/$DEFAULT")
+          echo "head=$HEAD" >> "$GITHUB_OUTPUT"; echo "base=$BASE" >> "$GITHUB_OUTPUT"
+          if [ -n "$RUN_SHA" ] && [ "$RUN_SHA" != "$HEAD" ]; then echo "verdict=stale" >> "$GITHUB_OUTPUT"; exit 0; fi
+          set +e
+          python3 ../trusted/.night-shift/gate.py --repo . --base "$BASE" --head "$HEAD" \
+            --config ../trusted/.night-shift/config.toml --out ../verdict.json --summary ../summary.md
+          set -e
+          cat ../summary.md >> "$GITHUB_STEP_SUMMARY"
+          echo "verdict=$(python3 -c 'import json;print(json.load(open("../verdict.json"))["verdict"])')" >> "$GITHUB_OUTPUT"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: night-shift-verdict
+          path: verdict.json
+          if-no-files-found: ignore
+  merge:
+    needs: verify
+    if: needs.verify.outputs.verdict == 'pass' || needs.verify.outputs.verdict == 'fail'
+    runs-on: ubuntu-latest
+    timeout-minutes: 75
+    permissions:
+      contents: write
+      actions: write
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          fetch-depth: 0
+      - uses: actions/download-artifact@v4
+        with:
+          name: night-shift-verdict
+          path: ${{ runner.temp }}/verdict
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Merge or record
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ALERT_KEY: ${{ secrets.NIGHT_SHIFT_ALERT_KEY }}
+          VERDICT: ${{ needs.verify.outputs.verdict }}
+        run: |
+          mode=reject; [ "$VERDICT" = pass ] && mode=merge
+          python3 .night-shift/merge.py "$mode" --branch "${{ needs.verify.outputs.branch }}" \
+            --head "${{ needs.verify.outputs.head }}" --base "${{ needs.verify.outputs.base }}" \
+            --verdict "$RUNNER_TEMP/verdict/verdict.json"

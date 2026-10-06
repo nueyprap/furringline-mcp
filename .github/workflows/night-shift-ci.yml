@@ -1,0 +1,15 @@
+name: night-shift-ci
+# Night Shift: a push to a night-shift/* branch only signals the trusted gate.
+# The gate and the merge run in night-shift-merge.yml, which GitHub always runs from the
+# default branch (workflow_run), so a branch cannot change its own gate.
+# Installed by nuey-skills/scripts/night-shift/install.py; do not edit here.
+on:
+  push:
+    branches: ['night-shift/**']
+permissions: {}
+jobs:
+  signal:
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - run: echo "Night Shift branch ${GITHUB_REF_NAME} at ${GITHUB_SHA}; night-shift-merge gates it next."

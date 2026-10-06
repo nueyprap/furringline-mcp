@@ -1,0 +1,17 @@
+# Night Shift config for furringline-mcp. Trusted: the gate reads this file from the base branch only.
+# PUBLIC repo of plugin/MCP manifests that outside users install (Claude, Cursor, Gemini, MCP registry).
+# Tier high: config only, a bad manifest breaks installs; only fix/docs/chore, small diffs.
+# Validated 2026-10-06 on the Mac: no tests (config only); every tracked JSON file parses.
+enabled = true
+tier = "high"
+base = "main"
+merge_mode = "push"
+kinds = ["fix","docs","chore"]
+max_changed_lines = 150
+max_files = 6
+protected = ["LICENSE", "assets/**"]
+setup = []
+checks = ["for f in $(git ls-files '*.json'); do python3 -m json.tool \"$f\" >/dev/null || { echo \"bad JSON: $f\"; exit 1; }; done"]
+test_command = ""
+repeat = 2
+timeout_seconds = 300
