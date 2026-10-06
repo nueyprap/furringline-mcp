@@ -40,7 +40,7 @@ import time
 import tomllib
 from pathlib import Path
 
-VERSION = "0.1.1"
+VERSION = "0.1.2"
 
 DEFAULT_PROTECTED = [
     ".github/**", ".night-shift/**", ".jev/**", ".githooks/**", ".claude/**", ".codex/**",
@@ -51,7 +51,7 @@ DEFAULT_KINDS = ["fix", "test", "refactor", "perf", "security", "deps", "docs", 
 LOCKFILES = {"package-lock.json", "pnpm-lock.yaml", "yarn.lock", "composer.lock", "poetry.lock",
              "uv.lock", "Pipfile.lock", "bun.lockb"}
 
-TEST_PATH_RE = re.compile(r"(^|/)(tests?|__tests__|spec)/|(^|/)test_[^/]*$|[._-](test|spec)\.[^/]+$|Test\.php$")
+TEST_PATH_RE = re.compile(r"(^|/)(tests?|__tests__|spec)/|(^|/)test[_-][^/]*$|[._-](test|spec)\.[^/]+$|Test\.php$")
 TEST_CASE_RE = re.compile(
     r"(?m)(?:^|[^\w.])(?:it|test)(?:\.each\s*\([^)]*\))?\s*\(\s*[`'\"]"   # JS/TS it('..') test('..')
     r"|^\s*(?:async\s+)?def\s+test_\w+"                                  # Python

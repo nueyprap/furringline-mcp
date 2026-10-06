@@ -59,7 +59,8 @@ def alert(title: str, message: str):
         return
     body = json.dumps({"title": title[:200], "message": message[:4000], "source": "night-shift"}).encode()
     req = urllib.request.Request(ALERT_URL, data=body, method="POST",
-                                 headers={"Content-Type": "application/json", "X-Alert-Key": key})
+                                 headers={"Content-Type": "application/json", "X-Alert-Key": key,
+                                          "User-Agent": "night-shift/1.0"})  # Cloudflare blocks Python-urllib
     try:
         urllib.request.urlopen(req, timeout=20).read()
     except Exception as e:  # never fail the job because the alert hub is down
