@@ -96,6 +96,37 @@ def dispatch_and_wait(workflow: str, ref: str, inputs: dict | None = None, timeo
     return False, f"{url} (timed out)"
 
 
+def pr_checks_and_wait(workflow: str, branch: str, timeout=1800) -> tuple[bool, str]:
+    """A PR opened by the workflow token gets its pull_request runs held for approval
+    ("action_required"). Approve them and wait; required checks are judged on the PR's
+    own run. Falls back to a workflow_dispatch run when no pull_request run appears."""
+    deadline = time.time() + 90
+    run_id = None
+    while time.time() < deadline and not run_id:
+        rows = json.loads(run("gh", "run", "list", "--repo", REPO, "--workflow", workflow, "--branch", branch,
+                              "--event", "pull_request", "--limit", "5", "--json", "databaseId,status,conclusion"))
+        for r in rows:
+            run_id = r["databaseId"]
+            if r["conclusion"] == "action_required" or r["status"] == "action_required":
+                run("gh", "api", "-X", "POST", f"repos/{REPO}/actions/runs/{run_id}/approve", check=False)
+            break
+        if not run_id:
+            time.sleep(10)
+    if not run_id:
+        return dispatch_and_wait(workflow, branch, timeout=timeout)
+    url = f"https://github.com/{REPO}/actions/runs/{run_id}"
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        time.sleep(15)
+        r = json.loads(run("gh", "run", "view", str(run_id), "--repo", REPO, "--json", "status,conclusion"))
+        if r["conclusion"] == "action_required":
+            run("gh", "api", "-X", "POST", f"repos/{REPO}/actions/runs/{run_id}/approve", check=False)
+            continue
+        if r["status"] == "completed":
+            return r["conclusion"] == "success", url
+    return False, f"{url} (timed out)"
+
+
 def append_log(entry: dict):
     """Append one JSON line to results.jsonl on the log branch (created on first use)."""
     line = json.dumps(entry, sort_keys=True)
@@ -191,13 +222,15 @@ def main(argv=None) -> int:
         body = (f"Gated by night-shift-merge: {entry['run']}\nMetrics: {json.dumps(entry['metrics'])}\n\n"
                 f"Night-Shift-Merge: {a.branch}")
         if cfg.get("merge_mode", "push") == "pr":
-            pr = run("gh", "pr", "create", "--repo", REPO, "--base", base_branch, "--head", a.branch,
-                     "--title", title, "--body", body)
+            existing = run("gh", "pr", "list", "--repo", REPO, "--head", a.branch, "--state", "open",
+                           "--json", "url", "--jq", ".[0].url // empty")
+            pr = existing or run("gh", "pr", "create", "--repo", REPO, "--base", base_branch, "--head", a.branch,
+                                 "--title", title, "--body", body)
             entry["pr"] = pr
             run("gh", "api", "-X", "PUT", f"repos/{REPO}/pulls/{pr.rsplit('/', 1)[-1]}/update-branch", check=False)
             time.sleep(10)
             for wf in cfg.get("dispatch_before_merge", []):
-                ok, url = dispatch_and_wait(wf, a.branch)
+                ok, url = pr_checks_and_wait(wf, a.branch)
                 if not ok:
                     run("gh", "pr", "close", pr, "--repo", REPO, "--comment", f"Night Shift: required check failed: {url}",
                         check=False)
