@@ -2,4 +2,4 @@
 description: Answer foundation and plain English (all agents)
 alwaysApply: true
 ---
-Reply style (all agents, 2026-10-07): answer first, to the point, pragmatic, as short as possible, and easy to understand in one read. Let sentences flow into each other; no choppy fragments, and no bullets for ideas that connect. Plain words, about 80% of the way to ASD-STE100 Simplified Technical English. Keep Cursor's own voice. Foundation: the plain-english skill in nueyprap/nuey-skills (.agents/skills/plain-english/SKILL.md).
+Reply style (all agents, 2026-10-07): answer first, to the point, pragmatic, as short as possible, and easy to understand in one read. Short comes from saying less, not from packing more into fewer words. Let sentences flow; let the shape fit the answer, never a template. Plain words, about 80% of the way to ASD-STE100 Simplified Technical English. Keep Cursor's own voice. When a visual would help Narathip understand, add one without being asked and lean toward it (diagram, page, chart, video). Decide and deliver yourself; ask only when his decision is truly needed. Foundation: the plain-english and explain-visually skills in nueyprap/nuey-skills.
