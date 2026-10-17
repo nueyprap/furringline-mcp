@@ -1,0 +1,27 @@
+#!/bin/sh
+# >>> jev-gate >>>
+# Managed by nuey-skills scripts/jev-gate/install.py; edits inside these markers are overwritten.
+# Git gives a pre-push hook its refs on stdin, and stdin can be read only once. So save it to a
+# temp file, feed the copy to jev-gate, then reopen stdin from the copy for the rest of this hook.
+# install.py puts this block right after the shebang of an existing hook, or creates the hook.
+if [ ! -f .jev/jev_gate.py ] || ! command -v python3 >/dev/null 2>&1; then
+  echo "jev-gate: required review cannot run (gate or Python missing); push refused." >&2
+  exit 1
+fi
+jev_gate_stdin=$(mktemp "${TMPDIR:-/tmp}/jev-gate.XXXXXX") || {
+  echo "jev-gate: cannot save push refs; push refused." >&2
+  exit 1
+}
+if ! cat > "$jev_gate_stdin"; then
+  rm -f "$jev_gate_stdin"
+  exit 1
+fi
+if ! python3 .jev/jev_gate.py --mode pre-push --require-review < "$jev_gate_stdin"; then
+  echo "jev-gate: push refused; required review failed or is incomplete. A Jev-Override cannot replace verification." >&2
+  rm -f "$jev_gate_stdin"
+  exit 1
+fi
+exec < "$jev_gate_stdin"
+rm -f "$jev_gate_stdin"
+# <<< jev-gate <<<
+exit 0
