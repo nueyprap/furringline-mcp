@@ -19,6 +19,17 @@
           }
         ]
       }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"$(git rev-parse --show-toplevel)/.jev/jev_gate.py\" --mode stop --require-review",
+            "timeout": 30
+          }
+        ]
+      }
     ]
   }
 }

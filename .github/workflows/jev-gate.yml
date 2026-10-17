@@ -1,0 +1,40 @@
+# jev-gate: Jev (TypeSafe) pass/fail check on every pull request.
+# Managed by nuey-skills scripts/jev-gate/install.py; re-run it to update.
+name: jev-gate
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, edited, ready_for_review]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: jev-gate-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  jev:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Jev gate
+        # PR text reaches the script only through env, never inline in `run:` (script injection).
+        env:
+          TYPESAFE_API_KEY: ${{ secrets.TYPESAFE_API_KEY }}
+          BASE_REF: ${{ github.base_ref }}
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          PR_BODY: ${{ github.event.pull_request.body }}
+        run: python3 .jev/jev_gate.py --mode ci --require-review --base "origin/$BASE_REF"
+
+      - name: Upload Jev gate log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: jev-gate-log
+          path: jev-gate-log.jsonl
+          if-no-files-found: ignore
