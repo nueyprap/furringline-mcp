@@ -1,0 +1,236 @@
+# review: the second reviewer. A fresh Claude (the newest Opus, on Narathip's Claude plan)
+# reads every pull request with code changes and fails this check on a real problem.
+# Source: nuey-skills scripts/second-reviewer/review.yml, installed by
+# scripts/second-reviewer/install.py. Do not edit here: change the source and re-install.
+# Required check `review` under the checks-before-main ruleset. Skill: second-reviewer.
+name: review
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pull-requests: write
+
+concurrency:
+  group: review-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  review:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      SKIP_SUFFIXES: ".md .mdx .markdown .rst"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+
+      - name: Scope
+        id: scope
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          BASE_REF: ${{ github.event.pull_request.base.ref || github.event.repository.default_branch }}
+          HEAD_REF: ${{ github.event.pull_request.head.ref || github.ref_name }}
+          HAS_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN != '' }}
+          SKIP_BRANCHES: ${{ vars.REVIEW_SKIP_BRANCHES }}
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import json, os, subprocess
+          def sh(*a, check=True):
+              return subprocess.run(a, capture_output=True, text=True, check=check).stdout
+          out = {}
+          base = os.environ["BASE_REF"]
+          sh("git", "fetch", "-q", "origin", base)
+          mb = sh("git", "merge-base", f"origin/{base}", "HEAD").strip()
+          files = [f for f in sh("git", "diff", "--name-only", f"{mb}...HEAD").splitlines() if f]
+          pr = os.environ.get("PR_NUMBER") or ""
+          if not pr:
+              found = sh("gh", "pr", "list", "-R", os.environ["REPO"], "--head", os.environ["HEAD_REF"],
+                         "--state", "open", "--json", "number", "--jq", ".[0].number", check=False).strip()
+              pr = found
+          suffixes = tuple(os.environ["SKIP_SUFFIXES"].split())
+          code = [f for f in files if not f.lower().endswith(suffixes)]
+          os.makedirs(".second-review", exist_ok=True)
+          head = os.environ["HEAD_REF"]
+          skip_branches = [p.strip() for p in (os.environ.get("SKIP_BRANCHES") or "").split(",") if p.strip()]
+          if not files:
+              out.update(skip="true", reason="no changed files")
+          elif any(head.startswith(p) for p in skip_branches):
+              out.update(skip="true", reason=f"branch {head} matches repository variable REVIEW_SKIP_BRANCHES")
+          elif not code:
+              out.update(skip="true", reason=f"docs only ({len(files)} file(s), all {' '.join(suffixes)})")
+          elif os.environ.get("HAS_TOKEN") != "true":
+              out.update(skip="false", missing_token="true", reason="no CLAUDE_CODE_OAUTH_TOKEN secret")
+          else:
+              out.update(skip="false", reason=f"{len(code)} code file(s) of {len(files)}")
+          title = body = ""
+          if pr:
+              info = json.loads(sh("gh", "pr", "view", pr, "-R", os.environ["REPO"], "--json", "title,body", check=False) or "{}")
+              title, body = info.get("title", ""), info.get("body", "") or ""
+          with open(".second-review/pr.md", "w") as f:
+              f.write(f"# PR #{pr or '?'}: {title}\n\n{body}\n")
+          with open(".second-review/files.txt", "w") as f:
+              f.write("\n".join(files) + "\n")
+          with open(".second-review/diff.patch", "w") as f:
+              f.write(sh("git", "diff", "--stat", f"{mb}...HEAD") + "\n" + sh("git", "diff", f"{mb}...HEAD"))
+          out.update(pr=pr, base=mb)
+          with open(os.environ["GITHUB_OUTPUT"], "a") as g:
+              for k, v in out.items():
+                  g.write(f"{k}={v}\n")
+          print(json.dumps(out))
+          PY
+
+      - name: Install the newest Claude Code
+        if: steps.scope.outputs.skip != 'true' && steps.scope.outputs.missing_token != 'true'
+        shell: bash
+        run: |
+          curl -fsSL https://claude.ai/install.sh | bash -s -- stable
+          echo "CLAUDE_BIN=$HOME/.local/bin/claude" >> "$GITHUB_ENV"
+          "$HOME/.local/bin/claude" --version
+
+      - name: Review
+        id: claude
+        if: steps.scope.outputs.skip != 'true' && steps.scope.outputs.missing_token != 'true'
+        continue-on-error: true
+        uses: anthropics/claude-code-action@cab360f6565aa35a51d6ce9e43f1f4287c0a32ea # v1.0.241
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          github_token: ${{ github.token }}
+          allowed_bots: github-actions
+          path_to_claude_code_executable: ${{ env.CLAUDE_BIN }}
+          prompt: |
+            You are the second reviewer for a pull request in ${{ github.repository }}. Another agent
+            wrote it and will merge it by itself once the checks pass, with no human review. You are the
+            last look before it reaches the default branch. Be fair and exact: block only real problems.
+
+            Read first:
+            - .second-review/pr.md: the pull request title and description (what it claims to do).
+            - .second-review/files.txt: every changed file.
+            - .second-review/diff.patch: the full diff against the merge base (stat first). It can be long:
+              read it in parts with offsets. Open the changed files and their callers when the diff alone
+              does not show the behaviour.
+            - AGENTS.md and CLAUDE.md at the repository root, if they exist: the repository's rules.
+            Do not run tests or builds (the `ci` check does that) and do not change any file.
+
+            Answer these questions:
+            1. Does each change do what the description says? A change the description does not mention
+               is a problem only when it changes behaviour.
+            2. Is there an unintended behaviour change (a default, a schedule, a branch, a path, an
+               interface, error handling, something removed by accident)?
+            3. Is there a security, data-loss, money, sending or sign-in risk? For example a secret in code
+               or logs, a weaker permission, a delete or overwrite without a guard, a payment or an outgoing
+               email/message/post that could fire wrongly, a credential or login flow changed.
+            4. Are the tests real? Fail tests that cannot fail, assert nothing that matters, mock away the
+               thing under test, or were edited only to pass. No tests is fine for config or docs; say so
+               when new logic has none.
+            5. Does it break a rule in AGENTS.md / CLAUDE.md?
+
+            verdict "fail" only for a real problem: a bug, a risk from question 3, fake tests, a broken
+            rule, or a change that does not do what it claims. Style, naming, small refactors and "could
+            be nicer" are not failures: put them in notes. When unsure whether something is real, read
+            more code before deciding. Each problem needs the file, the line when you can, what is wrong
+            in one or two plain sentences, and the exact fix the author agent should make.
+            Write plain, short English. Your final answer is the structured output only.
+          claude_args: |
+            --model opus
+            --max-turns 60
+            --allowedTools "Read,Grep,Glob,Bash(git diff:*),Bash(git log:*),Bash(git show:*)"
+            --disallowedTools "Edit,Write,NotebookEdit,WebFetch,WebSearch"
+            --json-schema '{"type":"object","additionalProperties":false,"required":["verdict","summary","problems","notes"],"properties":{"verdict":{"type":"string","enum":["pass","fail"]},"summary":{"type":"string","description":"One to three plain sentences: what the PR does and your overall judgement."},"problems":{"type":"array","description":"Real problems only; empty when verdict is pass.","items":{"type":"object","additionalProperties":false,"required":["kind","file","what","fix"],"properties":{"kind":{"type":"string","enum":["does-not-match-description","unintended-behaviour","security","data-loss","money","sending","sign-in","fake-tests","rule-broken","bug"]},"file":{"type":"string"},"line":{"type":"integer"},"what":{"type":"string"},"fix":{"type":"string"}}}},"notes":{"type":"array","description":"Optional non-blocking remarks, at most 5.","items":{"type":"string"}}}}'
+
+      - name: Verdict
+        if: ${{ !cancelled() }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR: ${{ steps.scope.outputs.pr }}
+          SKIP: ${{ steps.scope.outputs.skip }}
+          MISSING_TOKEN: ${{ steps.scope.outputs.missing_token }}
+          REASON: ${{ steps.scope.outputs.reason }}
+          OUTCOME: ${{ steps.claude.outcome }}
+          STRUCTURED: ${{ steps.claude.outputs.structured_output }}
+          EXECUTION_FILE: ${{ steps.claude.outputs.execution_file }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import json, os, subprocess, sys
+          env = os.environ
+          MARK = "<!-- second-reviewer -->"
+          def usage():
+              info = {}
+              try:
+                  msgs = json.load(open(env.get("EXECUTION_FILE") or ""))
+              except Exception:
+                  return info
+              for m in msgs if isinstance(msgs, list) else []:
+                  if m.get("type") == "system" and m.get("subtype") == "init":
+                      info["model"] = m.get("model")
+                  if m.get("type") == "result":
+                      u = m.get("usage") or {}
+                      info.update(turns=m.get("num_turns"), seconds=round((m.get("duration_ms") or 0) / 1000),
+                                  tokens_in=(u.get("input_tokens") or 0) + (u.get("cache_read_input_tokens") or 0)
+                                  + (u.get("cache_creation_input_tokens") or 0),
+                                  tokens_out=u.get("output_tokens") or 0,
+                                  api_equiv_usd=m.get("total_cost_usd"))
+                      if m.get("is_error"):
+                          info["error"] = str(m.get("result") or m.get("subtype"))[:300]
+              return info
+          sha = (env.get("HEAD_SHA") or "")[:7]
+          u = usage()
+          if env.get("SKIP") == "true":
+              verdict, lines = "skip", [f"Skipped: {env.get('REASON')}. No Claude usage."]
+          elif env.get("MISSING_TOKEN") == "true":
+              verdict, lines = "fail", ["**Could not review:** this repository has no `CLAUDE_CODE_OAUTH_TOKEN` "
+                                        "Actions secret. Set it (nuey-skills `scripts/second-reviewer/set-secrets.sh`), then re-run this job."]
+          else:
+              try:
+                  out = json.loads(env.get("STRUCTURED") or "")
+              except ValueError:
+                  out = None
+              if not out or out.get("verdict") not in ("pass", "fail"):
+                  why = u.get("error") or f"the review step ended with '{env.get('OUTCOME')}' and no verdict"
+                  verdict, lines = "fail", [f"**Could not review:** {why}. Re-run this job (it may be a plan "
+                                            f"usage limit or an outage). Log: {env['RUN_URL']}"]
+              else:
+                  verdict = out["verdict"]
+                  lines = [out.get("summary", "").strip()]
+                  for i, p in enumerate(out.get("problems") or [], 1):
+                      where = p.get("file", "") + (f":{p['line']}" if p.get("line") else "")
+                      lines.append(f"\n{i}. **{p.get('kind')}** `{where}`: {p.get('what')}\n   Fix: {p.get('fix')}")
+                  if out.get("notes"):
+                      lines.append("\nNotes (not blocking):")
+                      lines += [f"- {n}" for n in out["notes"][:5]]
+          head = {"pass": "Second review: pass", "fail": "Second review: FAIL", "skip": "Second review: skipped"}[verdict]
+          meta = []
+          if u.get("model"):
+              meta.append(f"model {u['model']}")
+          if u.get("turns") is not None:
+              meta.append(f"{u['turns']} turns, {u.get('seconds')} s, {u.get('tokens_in')} in / {u.get('tokens_out')} out tokens")
+          meta += ["commit " + sha, "[log](" + env["RUN_URL"] + ")"]
+          footer = "\n\n<sub>" + " · ".join(meta) + "</sub>"
+          body = f"{MARK}\n### {head}\n\n" + "\n".join(lines) + footer
+          with open(env["GITHUB_STEP_SUMMARY"], "a") as f:
+              f.write(body + "\n")
+          usage_line = json.dumps({"verdict": verdict, **{k: u.get(k) for k in ("model", "turns", "tokens_in", "tokens_out", "api_equiv_usd")}})
+          print("second-reviewer-usage " + usage_line)
+          pr = env.get("PR")
+          if pr and verdict != "skip":
+              cid = subprocess.run(["gh", "api", f"repos/{env['REPO']}/issues/{pr}/comments", "--paginate", "--jq",
+                                    f'.[] | select(.user.login == "github-actions[bot]" and (.body | startswith("{MARK}"))) | .id'],
+                                   capture_output=True, text=True).stdout.split()
+              args = (["-X", "PATCH", f"repos/{env['REPO']}/issues/comments/{cid[-1]}"] if cid
+                      else ["-X", "POST", f"repos/{env['REPO']}/issues/{pr}/comments"])
+              subprocess.run(["gh", "api", *args, "-f", f"body={body}"], capture_output=True, text=True)
+          print(body)
+          sys.exit(1 if verdict == "fail" else 0)
+          PY
