@@ -1,0 +1,5 @@
+---
+description: Jev integration check reminder
+alwaysApply: true
+---
+Planning, designing or building something, or changing a workflow? Load the jev-integration-check skill: find where Jev (TypeSafe) judgments could help, then decide use, not now, or no, with a reason. Jev is TypeSafe's System One model: fast typed judgments (Choice, Noul, Score) for routing, ranking, extraction, verification. Use when semantic judgment helps; code keeps rules and execution. The skill is at .agents/skills/jev-integration-check/SKILL.md.

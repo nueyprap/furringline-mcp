@@ -14,7 +14,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "grep -qs 'jev-fit skill' \"$HOME/.codex/hooks.json\" || printf '%s' '{\"hookSpecificOutput\":{\"hookEventName\":\"UserPromptSubmit\",\"additionalContext\":\"Planning, designing or building something, or changing a workflow? Load the jev-fit skill: find where Jev (TypeSafe) judgments could help, then decide use, not now, or no, with a reason.\"}}'",
+            "command": "grep -qs 'jev-integration-check skill' \"$HOME/.codex/hooks.json\" || printf '%s' '{\"hookSpecificOutput\":{\"hookEventName\":\"UserPromptSubmit\",\"additionalContext\":\"Planning, designing or building something, or changing a workflow? Load the jev-integration-check skill: find where Jev (TypeSafe) judgments could help, then decide use, not now, or no, with a reason.\"}}'",
             "timeout": 5
           }
         ]
