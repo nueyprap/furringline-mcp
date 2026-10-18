@@ -17,7 +17,7 @@ a copy in .jev/jev_gate.py that install.py keeps up to date.
 """
 from __future__ import annotations
 
-VERSION = "0.1.5"
+VERSION = "0.1.6"
 
 import argparse
 import concurrent.futures
@@ -555,6 +555,39 @@ def valid_key(key):
 
 KEYCHAIN_SERVICE = "TypeSafe API Key"
 
+STOP_ALERT = " Tell Narathip by iMessage once (critical-blocker workflow) and stop; do not push."
+# Claude Code cloud adds the Authorization header for api.typesafe.ai itself (a "network
+# secret"); the session never sees the value. This marker means "send no header of our own".
+NETWORK_SECRET = "claude-cloud-network-secret"
+
+
+def claude_cloud():
+    return os.environ.get("CLAUDE_CODE_REMOTE", "").lower() == "true"
+
+
+def is_macos():
+    """The Macs keep the key in the Keychain; cloud agent sessions run on Linux."""
+    return sys.platform == "darwin"
+
+
+def key_setup_message(credential_source, failure_kind):
+    """One line naming where the key is missing or rejected and the fix. Never the value.
+
+    A missing or rejected key blocks everywhere (Narathip, 2026-10-18), so a key that
+    silently stops working cannot hide behind autonomous work."""
+    rejected = failure_kind in ("credential_rejected", "legacy_source_revoked")
+    if credential_source == NETWORK_SECRET:
+        return ("jev-gate: Jev key missing or rejected in this Claude Code cloud environment: add or "
+                "update the api.typesafe.ai network secret (header Authorization) in its settings.")
+    if is_macos():
+        return ("jev-gate: Jev key rejected on this Mac: save the new key in 1Password, then run "
+                "jev-key update-all." if rejected else
+                "jev-gate: Jev key missing in this Mac's Keychain: run jev-key refresh.")
+    return ("jev-gate: Jev key rejected in this environment: replace TYPESAFE_API_KEY in its secrets "
+            "settings." if rejected else
+            "jev-gate: Jev key missing in this environment: add TYPESAFE_API_KEY to its secrets settings "
+            "(Cursor cloud agent secrets, Codex cloud environment secrets, Hermes Cloud).")
+
 
 def keychain_key():
     """Fast local copy kept by jev-key in the login Keychain; never printed.
@@ -632,8 +665,9 @@ def ask_jev(key, state, qids, deadline):
     body = json.dumps({"model": MODEL, "state": state,
                        "questions": {q: question_payload(q) for q in qids}},
                       ensure_ascii=False).encode("utf-8")
-    headers = {"Authorization": f"Bearer {key}", "Content-Type": "application/json",
-               "User-Agent": f"jev-gate/{VERSION}"}
+    headers = {"Content-Type": "application/json", "User-Agent": f"jev-gate/{VERSION}"}
+    if key != NETWORK_SECRET:  # network secret: the platform proxy adds the header
+        headers["Authorization"] = f"Bearer {key}"
     last = "no attempt made"
     for _attempt in range(1 + RETRIES):
         remaining = deadline - time.monotonic()
@@ -1001,6 +1035,8 @@ def record_model_health(rec, repo):
     if not failure and not rec.get("model_verified"):
         return
     module_path = Path.home() / ".local/share/typesafe/typesafe-health.py"
+    if not is_macos() and not module_path.exists():
+        return  # cloud hosts have no health record; the setup message already says what to fix
     try:
         import importlib.util
         spec = importlib.util.spec_from_file_location("_typesafe_health", module_path)
@@ -1065,6 +1101,7 @@ def run(args):
     out = sys.stdout if mode == "ci" else sys.stderr   # stop: stdout is for hook JSON only
 
     hook = {}
+    loop = False
     if mode == "stop":
         try:
             hook = json.loads(stdin_text) if stdin_text.strip() else {}
@@ -1085,19 +1122,23 @@ def run(args):
     if not top:
         print("jev-gate: not inside a git repository; skipped.", file=out)
         if mode == "stop":
+            # Setup problem: block once at most, never again on a repeat Stop.
             print(json.dumps({"followup_message": "Fresh Jev evaluation required."} if args.cursor else
                              {"decision": "block", "reason": "Fresh Jev evaluation required."})
-                  if args.require_model or args.require_review else "{}")
+                  if (args.require_model or args.require_review) and not loop else "{}")
             return 0
         return 1 if args.require_model or args.require_review else 0
     repo = top.strip()
 
     key, credential_source = load_credential()
+    network_secret = not key and mode != "ci" and claude_cloud()
+    if network_secret:
+        key, credential_source = NETWORK_SECRET, NETWORK_SECRET
     if not key and mode == "ci":
         print(f"::error title=Jev gate::{MISSING_KEY_CI}")
         print(MISSING_KEY_CI)
         return 1
-    if not key:
+    if not key and not (args.require_model or args.require_review):
         print("jev-gate: no TYPESAFE_API_KEY; Jev check skipped (regex secret scan still runs).", file=out)
 
     if mode == "ci":
@@ -1114,7 +1155,7 @@ def run(args):
     name = repo_name(repo)
     rec = evaluate(diff, task=task_text(args.task, log), rules=read_rules(repo, base),
                    profile=profile, key=key, deadline=deadline, repository=name,
-                   cache_file=cache_path(repo) if mode != "ci" and not (args.no_cache or args.require_model or args.require_review) else None)
+                   cache_file=cache_path(repo) if mode != "ci" and not (network_secret or args.no_cache or args.require_model or args.require_review) else None)
     override = find_override(log)
     rec.update(credential_source=credential_source, repo=name, head=(git_try(repo, "rev-parse", "HEAD") or "").strip(), mode=mode,
                version=VERSION, latency_ms=int((time.monotonic() - started) * 1000),
@@ -1123,23 +1164,36 @@ def run(args):
 
     if credential_source == "revoked-legacy-file":
         rec.update(failure_kind="legacy_source_revoked", replacement_needed=True)
-    model_required = (args.require_model or (args.require_review and rec["jev_status"] != "empty")) and not rec["model_verified"]
-    blocked = rec["replacement_needed"] or model_required or (rec["verdict"] == "fail" and not rec["overridden"])
+    model_required = ((args.require_model or (args.require_review and rec["jev_status"] != "empty"))
+                      and not rec["model_verified"])
+    replacement = rec["replacement_needed"]
+    real_fail = rec["verdict"] == "fail" and not rec["overridden"]
+    setup_block = replacement or (model_required and rec["failure_kind"] in
+                                  ("no_credentials", "credential_rejected"))
+    setup_msg = key_setup_message(credential_source, rec["failure_kind"]) if setup_block else ""
+    # Stop blocks once for a setup problem; a repeat Stop cannot fix the key, so let it end.
+    loop_release = bool(loop and setup_block and not real_fail)
+    if loop_release:
+        print(setup_msg + " Not blocking this Stop again.", file=out)
+    blocked = not loop_release and (replacement or model_required or real_fail)
     rec["review_requirement"] = ("fresh-probe" if args.require_model else
                                  "fresh-for-change" if args.require_review else "advisory")
     rec["review_enforcement"] = ("blocked" if blocked else "not-applicable" if rec["jev_status"] == "empty" else
+                                 "released-repeat-stop" if loop_release else
                                  "satisfied" if args.require_model or args.require_review else "not-required")
-    record_model_health(rec, repo)
+    if not network_secret:  # the health record lives on the Macs
+        record_model_health(rec, repo)
     write_log(rec, mode)
-    if model_required:
+    if model_required and not loop_release and not setup_block:
         print("jev-gate: fresh complete model evaluation required; readiness not verified.", file=out)
 
     if mode == "stop":
-        if rec["verdict"] != "pass" or rec["jev_status"] == "unavailable":
+        if (rec["verdict"] != "pass" or rec["jev_status"] == "unavailable") and not loop_release:
             print(human_report(rec, full=False), file=sys.stderr)
         if blocked:
-            reason = ("TypeSafe credential replacement is required; Jev review is incomplete."
-                      if rec["replacement_needed"] else
+            reason = (setup_msg + STOP_ALERT if setup_block and not real_fail else
+                      "TypeSafe credential replacement is required; Jev review is incomplete."
+                      if replacement else
                       "Fresh complete Jev evaluation required; readiness not verified."
                       if model_required else failing_reason(rec))
             print(json.dumps({"followup_message": reason} if args.cursor else
@@ -1149,6 +1203,8 @@ def run(args):
         return 0
 
     print(human_report(rec, full=(mode == "ci")), file=out)
+    if blocked and setup_msg:
+        print(setup_msg, file=out)  # last line: where the key is missing and the fix
     if mode == "ci":
         github_outputs(rec)
     if args.json:
