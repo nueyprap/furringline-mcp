@@ -5,7 +5,8 @@
 enabled = true
 tier = "high"
 base = "main"
-merge_mode = "push"
+merge_mode = "pr"   # checks before main (2026-10-18): merge through a PR once the required checks pass
+dispatch_before_merge = ["ci.yml", "jev-gate.yml"]
 kinds = ["fix","docs","chore"]
 max_changed_lines = 150
 max_files = 6
