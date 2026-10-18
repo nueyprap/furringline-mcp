@@ -1,0 +1,31 @@
+# Fails when AGENTS.md is missing or lacks a required heading.
+# Source: nuey-skills scripts/repo-standard/agents-md.yml. Copy it to .github/workflows/agents-md.yml.
+# The heading list must match scripts/repo-standard/AGENTS.template.md.
+name: agents-md
+on:
+  pull_request:
+  push:
+    branches: [main]
+permissions:
+  contents: read
+jobs:
+  agents-md:
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - uses: actions/checkout@v4
+      - name: AGENTS.md has every required heading
+        run: |
+          set -eu
+          if [ ! -f AGENTS.md ]; then echo "::error::AGENTS.md is missing"; exit 1; fi
+          missing=0
+          for h in "What this repo is" "Build" "Test" "Typecheck and lint" "Run locally" "Deploy" \
+                   "Smoke test after deploy" "Rollback" "Secrets" "Monitoring and alerts" \
+                   "How changes merge" "Do not"; do
+            if ! grep -qxF "## $h" AGENTS.md; then
+              echo "::error file=AGENTS.md::missing heading: ## $h"
+              missing=1
+            fi
+          done
+          if [ "$missing" = 0 ]; then echo "AGENTS.md has all 12 required headings."; fi
+          exit "$missing"
