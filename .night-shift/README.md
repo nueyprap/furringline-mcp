@@ -1,10 +1,10 @@
-# Night Shift
+# Nightly Repo Improvements
 
-This folder belongs to Night Shift, the nightly autonomous coding routine. Its rules and gate
-live in `nueyprap/nuey-skills` under `scripts/night-shift/` and `.agents/skills/night-shift/`.
+This folder belongs to Nightly Repo Improvements (once called Night Shift), the nightly routine
+that improves this repository. Its rules and gate live in `nueyprap/nuey-skills` under `scripts/night-shift/` and `.agents/skills/nightly-repo-improvements/`.
 
-- `config.toml`: what Night Shift may change here and how the gate checks it.
+- `config.toml`: what the nightly routine may change here and how the gate checks it.
 - `gate.py`, `merge.py`: the trusted gate and merge step. GitHub runs them from the default branch.
-- Pause Night Shift in this repository: add an empty file `.night-shift/PAUSED` on the default branch.
+- Pause it in this repository: add an empty file `.night-shift/PAUSED` on the default branch.
 
 Do not edit these files by hand here: change them in nuey-skills and re-run the installer.
