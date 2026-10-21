@@ -1,4 +1,47 @@
 #!/bin/sh
+# >>> no-force-push >>>
+# Managed by nuey-skills scripts/no-force-push/install.py; edits inside these markers are overwritten.
+# Refuses a push that would rewrite a branch (Narathip, 2026-10-21). Every branch update must be a
+# fast-forward of what the remote has, so --force, --force-with-lease, --mirror and +refspecs are
+# all refused, for every agent and person. A new branch is fine. Deleting a task branch
+# (refs/heads/<prefix>/<name>) is fine; deleting main or a lane branch is refused. Tags are not checked.
+# To bring a branch up to date: git merge origin/main (never rebase a pushed branch), then push.
+# Git gives the refs on stdin once, so they are saved and stdin is reopened for the rest of the hook.
+nfp_refs=$(mktemp "${TMPDIR:-/tmp}/no-force-push.XXXXXX") || {
+  echo "no-force-push: cannot save push refs; push refused." >&2
+  exit 1
+}
+if ! cat > "$nfp_refs"; then
+  rm -f "$nfp_refs"
+  exit 1
+fi
+nfp_bad=""
+while read -r nfp_lref nfp_lsha nfp_rref nfp_rsha; do
+  case "$nfp_rref" in refs/heads/*) ;; *) continue ;; esac
+  case "$nfp_lsha" in
+    *[!0]*) ;;
+    *) case "$nfp_rref" in
+         refs/heads/*/*) ;;
+         *) nfp_bad="$nfp_bad ${nfp_rref#refs/heads/}(delete)" ;;
+       esac
+       continue ;;
+  esac
+  case "$nfp_rsha" in *[!0]*) ;; *) continue ;; esac
+  if ! git merge-base --is-ancestor "$nfp_rsha" "$nfp_lsha" 2>/dev/null; then
+    nfp_bad="$nfp_bad ${nfp_rref#refs/heads/}"
+  fi
+done < "$nfp_refs"
+if [ -n "$nfp_bad" ]; then
+  echo "no-force-push: push refused for:$nfp_bad" >&2
+  echo "  force-push is not allowed: merge origin/main into your branch instead of rebasing, then push normally." >&2
+  echo "  If the remote branch moved: git pull --no-rebase, then push. Never --no-verify." >&2
+  echo "  Rule: .agents/skills/checks-before-main/SKILL.md" >&2
+  rm -f "$nfp_refs"
+  exit 1
+fi
+exec < "$nfp_refs"
+rm -f "$nfp_refs"
+# <<< no-force-push <<<
 # >>> jev-gate >>>
 # Managed by nuey-skills scripts/jev-gate/install.py; edits inside these markers are overwritten.
 # Git gives a pre-push hook its refs on stdin, and stdin can be read only once. So save it to a
