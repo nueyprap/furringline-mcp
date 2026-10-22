@@ -43,7 +43,7 @@ jobs:
         shell: bash
         run: |
           python3 - <<'PY'
-          import json, os, subprocess
+          import json, os, re, subprocess
           def sh(*a, check=True):
               return subprocess.run(a, capture_output=True, text=True, check=check).stdout
           out = {}
@@ -61,10 +61,81 @@ jobs:
           os.makedirs(".second-review", exist_ok=True)
           head = os.environ["HEAD_REF"]
           skip_branches = [p.strip() for p in (os.environ.get("SKIP_BRANCHES") or "").split(",") if p.strip()]
+
+          # Merge resolutions (2026-10-22): agents edit the same files in parallel and merge the base
+          # into their branch before landing, resolving conflicts themselves. List every merge commit
+          # on this branch that brought in the base, replay it with `git merge-tree` to see which
+          # files conflicted, and keep how the author resolved them (`git show --remerge-diff`).
+          # Capped so the reviewer's budget holds; the newest merges come first.
+          MAX_MERGES, MAX_BYTES = 8, 60000
+          def is_ancestor(a, b):
+              return subprocess.run(["git", "merge-base", "--is-ancestor", a, b], capture_output=True).returncode == 0
+          merges = []
+          for ln in sh("git", "rev-list", "--merges", "--parents", f"{mb}..HEAD").splitlines():
+              m, *parents = ln.split()
+              if len(parents) < 2 or not any(is_ancestor(p, f"origin/{base}") for p in parents[1:]):
+                  continue  # a merge of some other branch, not of the base
+              mt = subprocess.run(["git", "merge-tree", "--write-tree", "--name-only", "--no-messages", parents[0], parents[1]],
+                                  capture_output=True, text=True)
+              conflicted = [f for f in mt.stdout.splitlines()[1:] if f.strip()] if mt.returncode == 1 else []
+              merges.append({"sha": m, "parents": parents, "conflicted": conflicted,
+                             "subject": sh("git", "log", "-1", "--format=%s", m).strip()})
+          markers = []  # leftover conflict markers on lines this branch adds
+          cur, lno = "", 0
+          for ln in sh("git", "diff", "-U0", f"{mb}...HEAD").splitlines():
+              if ln.startswith("+++ "):
+                  cur = ln[6:] if ln.startswith("+++ b/") else ""
+              elif ln.startswith("@@"):
+                  hm = re.search(r"\+(\d+)", ln)
+                  lno = int(hm.group(1)) if hm else 0
+              elif ln.startswith("+") and cur:
+                  if re.match(r"\+(<{7}|>{7}|\|{7})( |$)", ln) or (re.match(r"\+={7}$", ln) and not cur.lower().endswith(suffixes)):
+                      markers.append(f"{cur}:{lno} `{ln[1:60]}`")
+                  lno += 1
+          conflicted_merges = [x for x in merges if x["conflicted"]]
+          parts = [f"# Merges from the base branch ({base}) in this pull request\n"]
+          if not merges:
+              parts.append("No merge commit on this branch brought in the base branch.\n")
+          else:
+              parts.append(f"{len(merges)} merge commit(s) brought in origin/{base}; {len(conflicted_merges)} had conflicts "
+                           "when replayed with `git merge-tree`. Newest first.\n")
+          used = 0
+          for i, x in enumerate(merges):
+              head_line = f"\n## {x['sha'][:9]} {x['subject']}\n\nParents: {x['parents'][0][:9]} (this branch) + {x['parents'][1][:9]} (base)\n"
+              if x["conflicted"]:
+                  head_line += "Conflicts when replayed: " + ", ".join(f"`{f}`" for f in x["conflicted"]) + "\n"
+              else:
+                  head_line += "Replayed cleanly (no conflicts).\n"
+              rd = ""
+              if i < MAX_MERGES:
+                  rd = sh("git", "show", "--remerge-diff", "--format=", x["sha"], check=False).strip()
+              if rd:
+                  room = max(0, MAX_BYTES - used)
+                  if len(rd) > room:
+                      rd = rd[:room] + f"\n... cut: run `git show --remerge-diff {x['sha'][:9]}` for the rest"
+                  used += len(rd)
+                  head_line += ("How the author resolved it (`git show --remerge-diff`: lines starting with - are git's "
+                                "automatic merge with conflict markers, + is what was committed):\n\n```diff\n" + rd + "\n```\n")
+              elif i < MAX_MERGES:
+                  head_line += "Resolution: git's automatic merge was committed unchanged.\n"
+              else:
+                  head_line += f"Resolution not shown (over {MAX_MERGES} merges): `git show --remerge-diff {x['sha'][:9]}`.\n"
+              parts.append(head_line)
+          if markers:
+              parts.append("\n## Leftover conflict markers on lines this branch adds\n\n" + "\n".join(f"- {mk}" for mk in markers[:40]) + "\n")
+          with open(".second-review/merges.md", "w") as f:
+              f.write("".join(parts))
+          out.update(base_merges=str(len(merges)), conflicted_merges=str(len(conflicted_merges)), markers=str(len(markers)))
+
           if not files:
               out.update(skip="true", reason="no changed files")
           elif any(head.startswith(p) for p in skip_branches):
               out.update(skip="true", reason=f"branch {head} matches repository variable REVIEW_SKIP_BRANCHES")
+          elif not code and (conflicted_merges or markers):
+              # docs only, but a conflict was resolved here: docs are what agents read, so a lost rule
+              # matters as much as lost code. Review the resolution.
+              out.update(skip="false", reason=f"docs only, but {len(conflicted_merges)} base merge(s) had conflicts"
+                         f"{' and conflict markers were added' if markers else ''}: reviewing the resolution")
           elif not code:
               out.update(skip="true", reason=f"docs only ({len(files)} file(s), all {' '.join(suffixes)})")
           elif os.environ.get("HAS_TOKEN") != "true":
@@ -104,7 +175,7 @@ jobs:
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           github_token: ${{ github.token }}
-          allowed_bots: github-actions,nuey-agents
+          allowed_bots: github-actions,nuey-agents,cursor
           path_to_claude_code_executable: ${{ env.CLAUDE_BIN }}
           prompt: |
             You are the second reviewer for a pull request in ${{ github.repository }}. Another agent
@@ -117,6 +188,9 @@ jobs:
             - .second-review/diff.patch: the full diff against the merge base (stat first). It can be long:
               read it in parts with offsets. Open the changed files and their callers when the diff alone
               does not show the behaviour.
+            - .second-review/merges.md: every merge commit on this branch that brought in the base
+              branch, which files conflicted when it is replayed, how the author resolved each conflict
+              (`git show --remerge-diff`), and any conflict markers left on added lines.
             - AGENTS.md and CLAUDE.md at the repository root, if they exist: the repository's rules.
             Do not run tests or builds (the `ci` check does that) and do not change any file.
 
@@ -132,9 +206,22 @@ jobs:
                thing under test, or were edited only to pass. No tests is fine for config or docs; say so
                when new logic has none.
             5. Does it break a rule in AGENTS.md / CLAUDE.md?
+            6. Were merge conflicts resolved without losing anyone's work? Several agents change the same
+               files at the same time, and each one merges the base branch into its branch and resolves
+               conflicts by itself. For every merge in merges.md with conflicts or a resolution diff, open
+               each conflicted file on the base (`git show origin/<base>:<file>`; the base is named at the top of merges.md)
+               and on this branch (`git show HEAD:<file>`) and check that the other agents' changes from
+               the base are still there. Look for: conflict markers left in; a block duplicated or two
+               versions interleaved; a function, rule or setting changed on the base while this branch
+               kept the old version; a test, doc section, import or config entry from the base dropped.
+               In diff.patch such a loss shows as this branch deleting or reverting lines that the
+               description never mentions. A change from the base that is gone or half-merged, with no
+               reason in the description, is a real loss: kind "lost-change", say what was lost, and the
+               fix is to restore the base's change while keeping this branch's own change.
 
             verdict "fail" only for a real problem: a bug, a risk from question 3, fake tests, a broken
-            rule, or a change that does not do what it claims. Style, naming, small refactors and "could
+            rule, a change lost in a merge (question 6; leftover conflict markers always fail), or a
+            change that does not do what it claims. Style, naming, small refactors and "could
             be nicer" are not failures: put them in notes. When unsure whether something is real, read
             more code before deciding. Each problem needs the file, the line when you can, what is wrong
             in one or two plain sentences, and the exact fix the author agent should make.
@@ -144,7 +231,7 @@ jobs:
             --max-turns 60
             --allowedTools "Read,Grep,Glob,Bash(git diff:*),Bash(git log:*),Bash(git show:*)"
             --disallowedTools "Edit,Write,NotebookEdit,WebFetch,WebSearch"
-            --json-schema '{"type":"object","additionalProperties":false,"required":["verdict","summary","problems","notes"],"properties":{"verdict":{"type":"string","enum":["pass","fail"]},"summary":{"type":"string","description":"One to three plain sentences: what the PR does and your overall judgement."},"problems":{"type":"array","description":"Real problems only; empty when verdict is pass.","items":{"type":"object","additionalProperties":false,"required":["kind","file","what","fix"],"properties":{"kind":{"type":"string","enum":["does-not-match-description","unintended-behaviour","security","data-loss","money","sending","sign-in","fake-tests","rule-broken","bug"]},"file":{"type":"string"},"line":{"type":"integer"},"what":{"type":"string"},"fix":{"type":"string"}}}},"notes":{"type":"array","description":"Optional non-blocking remarks, at most 5.","items":{"type":"string"}}}}'
+            --json-schema '{"type":"object","additionalProperties":false,"required":["verdict","summary","problems","notes"],"properties":{"verdict":{"type":"string","enum":["pass","fail"]},"summary":{"type":"string","description":"One to three plain sentences: what the PR does and your overall judgement."},"problems":{"type":"array","description":"Real problems only; empty when verdict is pass.","items":{"type":"object","additionalProperties":false,"required":["kind","file","what","fix"],"properties":{"kind":{"type":"string","enum":["does-not-match-description","unintended-behaviour","security","data-loss","money","sending","sign-in","fake-tests","rule-broken","bug","lost-change"]},"file":{"type":"string"},"line":{"type":"integer"},"what":{"type":"string"},"fix":{"type":"string"}}}},"notes":{"type":"array","description":"Optional non-blocking remarks, at most 5.","items":{"type":"string"}}}}'
 
       - name: Verdict
         if: ${{ !cancelled() }}
