@@ -8,8 +8,17 @@ on:
     branches: [main]
 permissions:
   contents: read
+# A newer push to the same pull request replaces the older run; runs on main are never cancelled.
+concurrency:
+  group: agents-md-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 jobs:
   agents-md:
+    # On main, skip a merge whose tree equals the PR head's tree: the pull request already checked
+    # those exact files (same rule as main-green.yml, 2026-10-25).
+    if: >-
+      github.event_name != 'push' || github.event.head_commit.tree_id == '' ||
+      !contains(join(github.event.commits.*.tree_id, ','), format('{0},{0}', github.event.head_commit.tree_id))
     runs-on: ubuntu-latest
     timeout-minutes: 2
     steps:
