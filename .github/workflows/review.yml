@@ -450,7 +450,7 @@ jobs:
 
             1. team            team account token, the FURRINGLINE Team seat (CLAUDE_CODE_OAUTH_TOKEN_WORK), only while
                                its plan has room
-            2. work            work account token, narathip@furringline.com's own Max plan (CLAUDE_CODE_OAUTH_TOKEN_WORKMAX,
+            2. work            work account token, the work account's own Max plan (CLAUDE_CODE_OAUTH_TOKEN_WORKMAX,
                                added 2026-10-25), only while its plan has room; weekly-limit tier only
             3. personal        personal plan token (CLAUDE_CODE_OAUTH_TOKEN), only while its plan has room
             4. console-work    work Console API key (ANTHROPIC_API_KEY_CONSOLE_WORK), monthly API credits
