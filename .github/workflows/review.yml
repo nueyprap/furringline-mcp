@@ -1,34 +1,191 @@
 # review: the second reviewer. A fresh Claude (the newest Opus, on Narathip's Claude plan)
-# reads every pull request with code changes and fails this check on a real problem.
+# reads every pull request with code changes and fails this check on a real problem. A change to agent
+# rules (AGENTS.md, CLAUDE.md, APPROVAL_RULES.md, SKILL.md, hook code that can block agents; 2026-10-25) also
+# gets the rule review (nuey-skills scripts/rule-review/prompt.md), docs-only PRs included.
 # Source: nuey-skills scripts/second-reviewer/review.yml, installed by
 # scripts/second-reviewer/install.py. Do not edit here: change the source and re-install.
 # Required check `review` under the checks-before-main ruleset. Skill: second-reviewer.
+# gates-from-main.yml (nuey-skills) also calls this file as a reusable workflow (workflow_call under
+# pull_request_target, so main's copy runs) when a PR changes a gate file. That run checks out the base
+# branch and reads the PR only as git data, so no PR file (.claude/ settings, hooks) is loaded; it posts
+# its own comment (<!-- second-reviewer:main -->) and uses its own concurrency group.
 name: review
 
 on:
   pull_request:
     types: [opened, synchronize, reopened, ready_for_review]
   workflow_dispatch:
+  workflow_call:
 
 permissions:
   contents: read
   pull-requests: write
 
 concurrency:
-  group: review-${{ github.event.pull_request.number || github.ref }}
+  group: review-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
 jobs:
   review:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 45
     env:
       SKIP_SUFFIXES: ".md .mdx .markdown .rst"
+      # Repositories where docs are the product (agent instructions): docs-only PRs are reviewed there too.
+      REVIEW_DOCS_REPOS: "nueyprap/nuey-skills"
+      # pull_request_target (called by gates-from-main): the working tree is the base branch and the PR head
+      # is only a git ref. TRUSTED_HEAD is that commit; empty on a normal pull_request run. TRUSTED_NOTE is
+      # added after REVIEW_PROMPT (which ends with a new line) on that run only.
+      TRUSTED_HEAD: ${{ github.event_name == 'pull_request_target' && github.event.pull_request.head.sha || '' }}
+      TRUSTED_NOTE: >-
+        ${{ github.event_name == 'pull_request_target' && format('This is main''s own reviewer, run because the pull request changes a gate file (a check''s workflow or script). The working tree on disk is the base branch, NOT the pull request: the pull request head is commit {0}. Read the diff and file list in .second-review/, read a changed file as the pull request has it with `git show {0}:<file>`, and wherever these instructions say HEAD use {0}. Fail a change that weakens, skips or bypasses a check (a test or gate that can no longer fail, a lower threshold, a removed step) unless the description gives a real reason.', github.event.pull_request.head.sha) || '' }}
+      REVIEW_PROMPT: |
+        You are the second reviewer for a pull request in ${{ github.repository }}. Another agent
+        wrote it and will merge it by itself once the checks pass, with no human review. You are the
+        last look before it reaches the default branch. Be fair and exact: block only real problems.
+
+        Read first:
+        - .second-review/pr.md: the pull request title and description (what it claims to do).
+        - .second-review/files.txt: every changed file.
+        - .second-review/diff.patch: the full diff against the merge base (stat first). It can be long:
+          read it in parts with offsets. Open the changed files and their callers when the diff alone
+          does not show the behaviour.
+        - .second-review/merges.md: every merge commit on this branch that brought in the base
+          branch, which files conflicted when it is replayed, how the author resolved each conflict
+          (`git show --remerge-diff`), and any conflict markers left on added lines.
+        - AGENTS.md and CLAUDE.md at the repository root, if they exist: the repository's rules.
+        Do not run tests or builds (the `ci` check does that) and do not change any file.
+
+        Answer these questions:
+        1. Does each change do what the description says? A change the description does not mention
+           is a problem only when it changes behaviour.
+        2. Is there an unintended behaviour change (a default, a schedule, a branch, a path, an
+           interface, error handling, something removed by accident)?
+        3. Is there a security, data-loss, money, sending or sign-in risk? For example a secret in code
+           or logs, a weaker permission, a delete or overwrite without a guard, a payment or an outgoing
+           email/message/post that could fire wrongly, a credential or login flow changed.
+        4. Are the tests real? Fail tests that cannot fail, assert nothing that matters, mock away the
+           thing under test, or were edited only to pass. No tests is fine for config or docs; say so
+           when new logic has none.
+        5. Does it break a rule in AGENTS.md / CLAUDE.md?
+        6. Were merge conflicts resolved without losing anyone's work? Several agents change the same
+           files at the same time, and each one merges the base branch into its branch and resolves
+           conflicts by itself. For every merge in merges.md with conflicts or a resolution diff, open
+           each conflicted file on the base (`git show origin/<base>:<file>`; the base is named at the top of merges.md)
+           and on this branch (`git show HEAD:<file>`) and check that the other agents' changes from
+           the base are still there. Look for: conflict markers left in; a block duplicated or two
+           versions interleaved; a function, rule or setting changed on the base while this branch
+           kept the old version; a test, doc section, import or config entry from the base dropped.
+           In diff.patch such a loss shows as this branch deleting or reverting lines that the
+           description never mentions. A change from the base that is gone or half-merged, with no
+           reason in the description, is a real loss: kind "lost-change", say what was lost, and the
+           fix is to restore the base's change while keeping this branch's own change.
+        7. Does this PR create something new that holds data, state or config? That is: a new
+           repository; a Worker or a new D1, KV, R2, Queue or Durable Object binding; a Supabase table;
+           a LaunchAgent, routine or scheduled job; a queue, state or database file or folder that is
+           kept between runs; a watcher register item; a new credential consumer. If yes, it must be
+           covered by one of: the diff adds or updates the row that names it in
+           scripts/backups/backup_set.json (in nuey-skills); a `Backup: <row id>` line in the
+           description naming that row; or a `Backup-None: <reason>` line with a believable reason
+           (the data is rebuilt from elsewhere, it is a cache, it is test data). Something new that
+           keeps data with none of these is a real problem: kind "no-backup"; the fix is to add the
+           row (what, home, backup jobs, restore check) or the line. Scratch files, /tmp, caches
+           rebuilt every run, test fixtures and logs need no backup. A change to code that only reads
+           or uses existing data is not new data. A definition kept in a Git repository (code, a
+           workflow, a plist, a routine template, a wrangler file) is backed up with its repository,
+           and new repositories, Workers, D1 databases and KV namespaces are copied by themselves;
+           what counts is data kept outside Git that nothing copies yet.
+
+        verdict "fail" only for a real problem: a bug, a risk from question 3, fake tests, a broken
+        rule, a change lost in a merge (question 6; leftover conflict markers always fail), new
+        data with no backup (question 7), or a change that does not do what it claims. Style,
+        naming, small refactors and "could be nicer" are not failures: put them in notes. When unsure whether something is real, read
+        more code before deciding. Each problem needs the file, the line when you can, what is wrong
+        in one or two plain sentences, and the exact fix the author agent should make.
+        Docs: in nueyprap/nuey-skills, Markdown files are agent instructions that every agent follows, so
+        docs-only pull requests are reviewed there. A docs change fails only for a real problem: a rule that
+        contradicts another rule, a rule lost or weakened by accident, a wrong path or command, or a secret.
+        Wording, style and length go in notes.
+        Write plain, short English. Your final answer is the structured output only.
+      REVIEW_ARGS: |
+        --model opus
+        --max-turns 60
+        --allowedTools "Read,Grep,Glob,Bash(git diff:*),Bash(git log:*),Bash(git show:*)"
+        --disallowedTools "Edit,Write,NotebookEdit,WebFetch,WebSearch"
+        --json-schema '{"type":"object","additionalProperties":false,"required":["verdict","summary","problems","notes"],"properties":{"verdict":{"type":"string","enum":["pass","fail"]},"summary":{"type":"string","description":"One to three plain sentences: what the PR does and your overall judgement."},"problems":{"type":"array","description":"Real problems only; empty when verdict is pass.","items":{"type":"object","additionalProperties":false,"required":["kind","file","what","fix"],"properties":{"kind":{"type":"string","enum":["does-not-match-description","unintended-behaviour","security","data-loss","money","sending","sign-in","fake-tests","rule-broken","bug","lost-change","no-backup"]},"file":{"type":"string"},"line":{"type":"integer"},"what":{"type":"string"},"fix":{"type":"string"}}}},"notes":{"type":"array","description":"Optional non-blocking remarks, at most 5.","items":{"type":"string"}}}}'
+      RULE_PROMPT: |
+        You are the rule reviewer. This change adds or edits an agent rule: an instruction file (AGENTS.md, CLAUDE.md,
+        APPROVAL_RULES.md and the like), a skill definition (SKILL.md), or hook or check code that can stop an agent. Several
+        agents (Claude Code, Codex, Cursor, Grok Bots, Hermes) follow these rules literally, many sessions at once, on two
+        Macs and in the cloud, and nobody reads the rule again before it reaches all of them. A hook runs on every turn of
+        every session. A scope mistake that looks small here repeats thousands of times. You are the second look: look for flaws,
+        recheck the logic and reasoning, and find the outcomes nobody planned for.
+
+        Read first, in the review packet folder .rule-review:
+        - pr.md: what the change says it does.
+        - rules.md: the rule files in this change and why each counts as a rule.
+        - rules.patch: the diff of those files with wide context. Read all of it, in parts if it is long.
+        - files.txt and diff.patch: every changed file and the full diff (other code the rule uses).
+        Then read in the repository (this checkout is the change's head): the whole new text of each changed rule file, AGENTS.md, every skill or doc the change
+        names, and, for hook or check code, the function that decides to block, what it reads (state files, folders, other
+        agents' data), and how it is installed (which event, which agents, which machines). `git log` and `git show` are
+        allowed. Do not change any file and do not run anything else.
+
+        For each new or changed rule or hook, answer:
+        1. Scope. Who does it block, nag or change: one task, one session, every session of one agent type, every agent?
+           Is that the right scope? Picture a fresh session of the same agent that has nothing to do with the trigger, and
+           a session of another agent. A block that hits sessions which did not cause the problem and cannot fix it is a
+           problem.
+        2. Incentives. What is the cheapest thing an agent could do just to make the block or the nag go away? Deleting or
+           "cleaning up" files a live task still uses, touching other agents' files, skipping a step, writing fake
+           evidence, or quietly turning the check off. Text that lists other agents' folders, files or tasks next to an
+           instruction to free space or clean up invites exactly that. An escape hatch that accepts any free-text reason
+           lets an agent certify itself instead of doing the work.
+        3. Edge cases. Walk these concretely: work that runs for days; work waiting on Narathip; large legitimate work
+           (evals, test copies, long builds); another agent's files and tasks; a cloud session versus a Mac; both Macs off;
+           a missing, stale or broken state file; a low limit (disk, plan usage, budget). Does legitimate work get blocked
+           with no way out, or is there an escape hatch an agent can use honestly?
+        4. Clash. Does it contradict an existing rule in AGENTS.md, CLAUDE.md, APPROVAL_RULES.md or a skill (quote both), or
+           create a second, different version of a rule that already exists? A short pointer in AGENTS.md to a canonical
+           doc is this repository's normal pattern, not a duplicate.
+        5. Cost. Does it add a model call, a scheduled job, plan usage or money on every turn, PR or day, without saying so?
+        6. Enforceable. Can an agent follow it as written (clear trigger, owner, and done condition)? What evidence does a
+           hook or check read to decide? Does it see every honest way to satisfy it (work done by a subagent, another
+           session or the cloud), and is the evidence tied to this work and fresh, or does any old evidence count forever?
+           Does it fail open when its data is missing or it crashes, or can a bug in it stall every agent? A block with no
+           limit on how often it repeats is a loop.
+        7. Logic. Recheck the reasoning step by step. Does each step of the rule follow from the one before? Are the facts
+           and assumptions it rests on true in this repository? Check them in the files and the code; do not take pr.md's
+           word for it. Is the cause it names the real cause, so the problem it fixes does not come back?
+        8. Unanticipated outcomes. What happens that the author did not plan for: second-order effects (what agents do next
+           because of it), interactions with other rules, hooks, agents and accounts (work, personal, cloud), what it does
+           at scale, and what it does when a step it relies on fails halfway?
+
+        Verdict "fail" only for a real problem from these questions (a flaw in the logic is one): a concrete scenario where an agent following or
+        fighting this rule does the wrong thing, is blocked when it should not be, or puts data or another agent's work at
+        risk. Each problem names the file and its line number in the file as it is now (not in the patch), the scenario (who, doing what, gets which result), and a concrete fix
+        the author can make. Several flaws in one change are several problems; list each one separately.
+
+        Never fail on style, wording, length, structure, missing examples, or "could be clearer". Those go in notes.
+        Clarifications, log entries, recorded IDs, paths and dates, pointers to a canonical doc, and docs that only describe
+        what already exists are normal edits: pass them. When unsure whether a problem is real, read more before deciding;
+        if it is still only a guess, put it in notes, not in problems.
+
+        Write plain, short English. Your final answer is the structured output only.
+      RULE_ARGS: |
+        --model opus
+        --max-turns 60
+        --allowedTools "Read,Grep,Glob,Bash(git diff:*),Bash(git log:*),Bash(git show:*)"
+        --disallowedTools "Edit,Write,NotebookEdit,WebFetch,WebSearch"
+        --json-schema '{"type":"object","additionalProperties":false,"required":["verdict","summary","problems","notes"],"properties":{"verdict":{"type":"string","enum":["pass","fail"]},"summary":{"type":"string","description":"One to three plain sentences: what the rule change does and your overall judgement."},"problems":{"type":"array","description":"Real problems only; empty when verdict is pass. One item per flaw.","items":{"type":"object","additionalProperties":false,"required":["kind","file","scenario","what","fix"],"properties":{"kind":{"type":"string","enum":["wrong-scope","perverse-incentive","blocks-legit-work","cross-agent-risk","clash","duplicate","cost","unenforceable","fails-closed","loop","other"]},"file":{"type":"string"},"line":{"type":"integer"},"scenario":{"type":"string","description":"Who, doing what, gets which result."},"what":{"type":"string"},"fix":{"type":"string"}}}},"notes":{"type":"array","description":"Optional non-blocking remarks, at most 5.","items":{"type":"string"}}}}'
     steps:
+      # A normal run checks out the PR head. Under pull_request_target (called by gates-from-main) it checks
+      # out the base branch (the default ref) without a stored token; the Scope step fetches the PR head as data.
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          ref: ${{ github.event_name != 'pull_request_target' && (github.event.pull_request.head.sha || github.sha) || '' }}
+          persist-credentials: ${{ github.event_name != 'pull_request_target' }}
 
       - name: Scope
         id: scope
@@ -38,7 +195,7 @@ jobs:
           PR_NUMBER: ${{ github.event.pull_request.number }}
           BASE_REF: ${{ github.event.pull_request.base.ref || github.event.repository.default_branch }}
           HEAD_REF: ${{ github.event.pull_request.head.ref || github.ref_name }}
-          HAS_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN != '' }}
+          HAS_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN_WORK != '' || secrets.CLAUDE_CODE_OAUTH_TOKEN_WORKMAX != '' || secrets.CLAUDE_CODE_OAUTH_TOKEN != '' || secrets.ANTHROPIC_API_KEY_CONSOLE_WORK != '' || secrets.ANTHROPIC_API_KEY_CONSOLE != '' }}
           SKIP_BRANCHES: ${{ vars.REVIEW_SKIP_BRANCHES }}
         shell: bash
         run: |
@@ -46,18 +203,91 @@ jobs:
           import json, os, re, subprocess
           def sh(*a, check=True):
               return subprocess.run(a, capture_output=True, text=True, check=check).stdout
+
+          # --- rule files: start (copied verbatim into scripts/second-reviewer/review.yml) ---
+          import re as _re
+
+          RULE_NAMES = ("AGENTS.md", "CLAUDE.md", "APPROVAL_RULES.md", "MULTI_AGENT_WORKFLOW.md", "SOUL.md", "GEMINI.md",
+                        ".cursorrules")
+          RULE_GLOBS = (".agents/skills/*/SKILL.md", ".claude/skills/*/SKILL.md", "skills/*/SKILL.md", ".cursor/rules/*",
+                        ".githooks/*", ".claude/settings.json", ".codex/hooks.json", ".cursor/hooks.json", "hooks/hooks.json")
+          # Code that can stop an agent: a Claude Code / Codex / Cursor hook answer that blocks or denies.
+          HOOK_MARK = _re.compile(r"""["']decision["']\s*:\s*["']block["']|permissionDecision|hookSpecificOutput""")
+          NOT_CODE_EXT = (".md", ".mdx", ".markdown", ".rst", ".txt", ".json", ".yml", ".yaml", ".toml", ".html", ".css")
+
+
+          def _glob(path, g):
+              """Shell-style match where * stays inside one folder and ** crosses folders."""
+              rx = _re.escape(g).replace(r"\*\*", "\0").replace(r"\*", "[^/]*").replace("\0", ".*")
+              return _re.fullmatch(rx, path) is not None
+
+
+          def _is_test(path):
+              base = path.rsplit("/", 1)[-1]
+              return "/tests/" in "/" + path or base.startswith("test_") or "_test." in base or ".test." in base
+
+
+          def rule_reason(path, text=None, extra=()):
+              """Why `path` is an agent rule ('' when it is not). `text` is the file's content at the head (None: unknown);
+              `extra` are repository globs from .github/rule-paths.txt (checks that can block agents)."""
+              base = path.rsplit("/", 1)[-1]
+              if base in RULE_NAMES:
+                  return "instruction file"
+              if path == ".github/rule-paths.txt":  # dropping a line here would switch off its own review
+                  return "the rule review's list of extra rule paths"
+              for g in RULE_GLOBS:
+                  if _glob(path, g):
+                      return "skill definition" if path.endswith("SKILL.md") else "hook or agent settings"
+              for g in extra:
+                  if _glob(path, g):
+                      return f"listed in .github/rule-paths.txt ({g})"
+              ext = "." + base.rsplit(".", 1)[-1] if "." in base else ""
+              if text and not _is_test(path) and ext.lower() not in NOT_CODE_EXT and HOOK_MARK.search(text):
+                  return "hook code that can block an agent"
+              return ""
+
+
+          def read_extra(*texts):
+              """The globs in .github/rule-paths.txt: one per line, # comments. Pass the base and the head version: a change
+              is judged by both lists, so a PR cannot take its own files off the list."""
+              return tuple(dict.fromkeys(ln.split("#", 1)[0].strip() for t in texts for ln in (t or "").splitlines()
+                                         if ln.split("#", 1)[0].strip()))
+          # --- rule files: end ---
+
           out = {}
           base = os.environ["BASE_REF"]
-          sh("git", "fetch", "-q", "origin", base)
-          mb = sh("git", "merge-base", f"origin/{base}", "HEAD").strip()
-          files = [f for f in sh("git", "diff", "--name-only", f"{mb}...HEAD").splitlines() if f]
+          # HEAD is the PR head on a normal run. Called by gates-from-main the checkout is the base branch,
+          # with no stored token: fetch the PR head as a ref with the token in this command only.
+          HEAD = os.environ.get("TRUSTED_HEAD") or "HEAD"
+          fetch = ["git"]
+          if HEAD != "HEAD":
+              import base64
+              auth = base64.b64encode(f"x-access-token:{os.environ['GH_TOKEN']}".encode()).decode()
+              print(f"::add-mask::{auth}")
+              fetch += ["-c", f"http.https://github.com/.extraheader=AUTHORIZATION: basic {auth}"]
+          sh(*fetch, "fetch", "-q", "origin", base)
+          if HEAD != "HEAD":
+              sh(*fetch, "fetch", "-q", "--no-tags", "origin", f"+refs/pull/{os.environ['PR_NUMBER']}/head:refs/remotes/pr/head")
+              if subprocess.run(["git", "cat-file", "-e", f"{HEAD}^{{commit}}"], capture_output=True).returncode:
+                  sh(*fetch, "fetch", "-q", "--no-tags", "origin", HEAD)
+          mb = sh("git", "merge-base", f"origin/{base}", HEAD).strip()
+          files = [f for f in sh("git", "diff", "--name-only", f"{mb}...{HEAD}").splitlines() if f]
           pr = os.environ.get("PR_NUMBER") or ""
           if not pr:
               found = sh("gh", "pr", "list", "-R", os.environ["REPO"], "--head", os.environ["HEAD_REF"],
                          "--state", "open", "--json", "number", "--jq", ".[0].number", check=False).strip()
               pr = found
           suffixes = tuple(os.environ["SKIP_SUFFIXES"].split())
+          docs_repo = os.environ["REPO"] in (os.environ.get("REVIEW_DOCS_REPOS") or "").split()
           code = [f for f in files if not f.lower().endswith(suffixes)]
+          # Agent rules (2026-10-25): instruction files, skill definitions and hook code that can block an agent
+          # get the rule review, docs-only PRs included. The file's text at HEAD decides the hook-code case.
+          def at_head(path, ref=None):
+              r = subprocess.run(["git", "show", f"{ref or HEAD}:{path}"], capture_output=True)
+              return r.stdout[:300000].decode("utf-8", "replace") if r.returncode == 0 else None
+          # both lists, so a PR cannot take its own files off the list to skip the rule review
+          extra = read_extra(at_head(".github/rule-paths.txt", mb), at_head(".github/rule-paths.txt"))
+          rules = [(f, w) for f in files for w in [rule_reason(f, at_head(f), extra)] if w]
           os.makedirs(".second-review", exist_ok=True)
           head = os.environ["HEAD_REF"]
           skip_branches = [p.strip() for p in (os.environ.get("SKIP_BRANCHES") or "").split(",") if p.strip()]
@@ -71,7 +301,7 @@ jobs:
           def is_ancestor(a, b):
               return subprocess.run(["git", "merge-base", "--is-ancestor", a, b], capture_output=True).returncode == 0
           merges = []
-          for ln in sh("git", "rev-list", "--merges", "--parents", f"{mb}..HEAD").splitlines():
+          for ln in sh("git", "rev-list", "--merges", "--parents", f"{mb}..{HEAD}").splitlines():
               m, *parents = ln.split()
               if len(parents) < 2 or not any(is_ancestor(p, f"origin/{base}") for p in parents[1:]):
                   continue  # a merge of some other branch, not of the base
@@ -82,7 +312,7 @@ jobs:
                              "subject": sh("git", "log", "-1", "--format=%s", m).strip()})
           markers = []  # leftover conflict markers on lines this branch adds
           cur, lno = "", 0
-          for ln in sh("git", "diff", "-U0", f"{mb}...HEAD").splitlines():
+          for ln in sh("git", "diff", "-U0", f"{mb}...{HEAD}").splitlines():
               if ln.startswith("+++ "):
                   cur = ln[6:] if ln.startswith("+++ b/") else ""
               elif ln.startswith("@@"):
@@ -127,21 +357,33 @@ jobs:
               f.write("".join(parts))
           out.update(base_merges=str(len(merges)), conflicted_merges=str(len(conflicted_merges)), markers=str(len(markers)))
 
+          has_token = os.environ.get("HAS_TOKEN") == "true"
           if not files:
               out.update(skip="true", reason="no changed files")
           elif any(head.startswith(p) for p in skip_branches):
               out.update(skip="true", reason=f"branch {head} matches repository variable REVIEW_SKIP_BRANCHES")
-          elif not code and (conflicted_merges or markers):
-              # docs only, but a conflict was resolved here: docs are what agents read, so a lost rule
-              # matters as much as lost code. Review the resolution.
-              out.update(skip="false", reason=f"docs only, but {len(conflicted_merges)} base merge(s) had conflicts"
-                         f"{' and conflict markers were added' if markers else ''}: reviewing the resolution")
-          elif not code:
-              out.update(skip="true", reason=f"docs only ({len(files)} file(s), all {' '.join(suffixes)})")
-          elif os.environ.get("HAS_TOKEN") != "true":
-              out.update(skip="false", missing_token="true", reason="no CLAUDE_CODE_OAUTH_TOKEN secret")
           else:
-              out.update(skip="false", reason=f"{len(code)} code file(s) of {len(files)}")
+              why = []
+              if code:
+                  why.append(f"{len(code)} code file(s) of {len(files)}")
+              elif docs_repo:
+                  # docs are the product here (agent instructions): a docs-only PR is reviewed like code
+                  why.append(f"docs only ({len(files)} file(s)), and in {os.environ['REPO']} docs are agent instructions: reviewing")
+              elif conflicted_merges or markers:
+                  # docs only, but a conflict was resolved here: docs are what agents read, so a lost rule
+                  # matters as much as lost code. Review the resolution.
+                  why.append(f"docs only, but {len(conflicted_merges)} base merge(s) had conflicts"
+                             f"{' and conflict markers were added' if markers else ''}: reviewing the resolution")
+              if rules:
+                  why.append(f"{len(rules)} agent rule file(s): rule review")
+              out.update(code="true" if (code or docs_repo or conflicted_merges or markers) else "false",
+                         rules="true" if rules else "false")
+              if not why:
+                  out.update(skip="true", reason=f"docs only ({len(files)} file(s), all {' '.join(suffixes)}), no agent rules")
+              elif not has_token:
+                  out.update(skip="false", missing_token="true", reason="no CLAUDE_CODE_OAUTH_TOKEN_WORK, CLAUDE_CODE_OAUTH_TOKEN_WORKMAX, CLAUDE_CODE_OAUTH_TOKEN or ANTHROPIC_API_KEY_CONSOLE secret")
+              else:
+                  out.update(skip="false", reason="; ".join(why))
           title = body = ""
           if pr:
               info = json.loads(sh("gh", "pr", "view", pr, "-R", os.environ["REPO"], "--json", "title,body", check=False) or "{}")
@@ -151,7 +393,16 @@ jobs:
           with open(".second-review/files.txt", "w") as f:
               f.write("\n".join(files) + "\n")
           with open(".second-review/diff.patch", "w") as f:
-              f.write(sh("git", "diff", "--stat", f"{mb}...HEAD") + "\n" + sh("git", "diff", f"{mb}...HEAD"))
+              f.write(sh("git", "diff", "--stat", f"{mb}...{HEAD}") + "\n" + sh("git", "diff", f"{mb}...{HEAD}"))
+          if rules:  # the rule review's packet (same files as scripts/rule-review/rule_review.py writes)
+              os.makedirs(".rule-review", exist_ok=True)
+              for name in ("pr.md", "files.txt", "diff.patch"):
+                  with open(f".second-review/{name}") as src, open(f".rule-review/{name}", "w") as dst:
+                      dst.write(src.read())
+              with open(".rule-review/rules.md", "w") as f:
+                  f.write("# Rule files in this change\n\n" + "".join(f"- `{p}`: {w}\n" for p, w in rules))
+              with open(".rule-review/rules.patch", "w") as f:
+                  f.write(sh("git", "diff", "-U30", f"{mb}...{HEAD}", "--", *[p for p, _ in rules])[:400000])
           out.update(pr=pr, base=mb)
           with open(os.environ["GITHUB_OUTPUT"], "a") as g:
               for k, v in out.items():
@@ -167,71 +418,292 @@ jobs:
           echo "CLAUDE_BIN=$HOME/.local/bin/claude" >> "$GITHUB_ENV"
           "$HOME/.local/bin/claude" --version
 
+      # The key chain (Narathip 2026-10-25: "so we start with weekly limit first, from work then personal,
+      # then console credit, from work then personal, then usage credit, from work then personal"):
+      # each plan token only while its weekly limit has room (meter read first), then the Console API
+      # keys, then the plan tokens with extra usage. The chain code is nuey-skills
+      # scripts/claude-keys/key_chain.py, copied below by scripts/claude-keys/embed.py.
       - name: Review
         id: claude
         if: steps.scope.outputs.skip != 'true' && steps.scope.outputs.missing_token != 'true'
         continue-on-error: true
-        uses: anthropics/claude-code-action@cab360f6565aa35a51d6ce9e43f1f4287c0a32ea # v1.0.241
-        with:
-          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
-          github_token: ${{ github.token }}
-          allowed_bots: github-actions,nuey-agents,cursor
-          path_to_claude_code_executable: ${{ env.CLAUDE_BIN }}
-          prompt: |
-            You are the second reviewer for a pull request in ${{ github.repository }}. Another agent
-            wrote it and will merge it by itself once the checks pass, with no human review. You are the
-            last look before it reaches the default branch. Be fair and exact: block only real problems.
+        env:
+          CLAUDE_CODE_OAUTH_TOKEN_WORK: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN_WORK }}
+          CLAUDE_CODE_OAUTH_TOKEN_WORKMAX: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN_WORKMAX }}
+          CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          ANTHROPIC_API_KEY_CONSOLE_WORK: ${{ secrets.ANTHROPIC_API_KEY_CONSOLE_WORK }}
+          ANTHROPIC_API_KEY_CONSOLE: ${{ secrets.ANTHROPIC_API_KEY_CONSOLE }}
+          CLAUDE_KEY_CHAIN: ${{ vars.CLAUDE_KEY_CHAIN }}
+          KEY_ROOM_CAP: ${{ vars.KEY_ROOM_CAP }}
+          CODE: ${{ steps.scope.outputs.code }}
+        shell: bash
+        run: |
+          cat > "$RUNNER_TEMP/key_chain.py" <<'KEYCHAIN'
+          #!/usr/bin/env python3
+          """Run Claude Code down a chain of keys: the GitHub reviewer and the fix agents use this.
 
-            Read first:
-            - .second-review/pr.md: the pull request title and description (what it claims to do).
-            - .second-review/files.txt: every changed file.
-            - .second-review/diff.patch: the full diff against the merge base (stat first). It can be long:
-              read it in parts with offsets. Open the changed files and their callers when the diff alone
-              does not show the behaviour.
-            - .second-review/merges.md: every merge commit on this branch that brought in the base
-              branch, which files conflicted when it is replayed, how the author resolved each conflict
-              (`git show --remerge-diff`), and any conflict markers left on added lines.
-            - AGENTS.md and CLAUDE.md at the repository root, if they exist: the repository's rules.
-            Do not run tests or builds (the `ci` check does that) and do not change any file.
+              key_chain.py run --out <file> [--args-env NAME] -- <claude> -p <prompt> [args...]
+              key_chain.py plan            the chain this environment would try, without running anything
 
-            Answer these questions:
-            1. Does each change do what the description says? A change the description does not mention
-               is a problem only when it changes behaviour.
-            2. Is there an unintended behaviour change (a default, a schedule, a branch, a path, an
-               interface, error handling, something removed by accident)?
-            3. Is there a security, data-loss, money, sending or sign-in risk? For example a secret in code
-               or logs, a weaker permission, a delete or overwrite without a guard, a payment or an outgoing
-               email/message/post that could fire wrongly, a credential or login flow changed.
-            4. Are the tests real? Fail tests that cannot fail, assert nothing that matters, mock away the
-               thing under test, or were edited only to pass. No tests is fine for config or docs; say so
-               when new logic has none.
-            5. Does it break a rule in AGENTS.md / CLAUDE.md?
-            6. Were merge conflicts resolved without losing anyone's work? Several agents change the same
-               files at the same time, and each one merges the base branch into its branch and resolves
-               conflicts by itself. For every merge in merges.md with conflicts or a resolution diff, open
-               each conflicted file on the base (`git show origin/<base>:<file>`; the base is named at the top of merges.md)
-               and on this branch (`git show HEAD:<file>`) and check that the other agents' changes from
-               the base are still there. Look for: conflict markers left in; a block duplicated or two
-               versions interleaved; a function, rule or setting changed on the base while this branch
-               kept the old version; a test, doc section, import or config entry from the base dropped.
-               In diff.patch such a loss shows as this branch deleting or reverting lines that the
-               description never mentions. A change from the base that is gone or half-merged, with no
-               reason in the description, is a real loss: kind "lost-change", say what was lost, and the
-               fix is to restore the base's change while keeping this branch's own change.
+          Order (Narathip, 2026-10-25: "so we start with weekly limit first, from work then personal, then
+          console credit, from work then personal, then usage credit, from work then personal"):
 
-            verdict "fail" only for a real problem: a bug, a risk from question 3, fake tests, a broken
-            rule, a change lost in a merge (question 6; leftover conflict markers always fail), or a
-            change that does not do what it claims. Style, naming, small refactors and "could
-            be nicer" are not failures: put them in notes. When unsure whether something is real, read
-            more code before deciding. Each problem needs the file, the line when you can, what is wrong
-            in one or two plain sentences, and the exact fix the author agent should make.
-            Write plain, short English. Your final answer is the structured output only.
-          claude_args: |
-            --model opus
-            --max-turns 60
-            --allowedTools "Read,Grep,Glob,Bash(git diff:*),Bash(git log:*),Bash(git show:*)"
-            --disallowedTools "Edit,Write,NotebookEdit,WebFetch,WebSearch"
-            --json-schema '{"type":"object","additionalProperties":false,"required":["verdict","summary","problems","notes"],"properties":{"verdict":{"type":"string","enum":["pass","fail"]},"summary":{"type":"string","description":"One to three plain sentences: what the PR does and your overall judgement."},"problems":{"type":"array","description":"Real problems only; empty when verdict is pass.","items":{"type":"object","additionalProperties":false,"required":["kind","file","what","fix"],"properties":{"kind":{"type":"string","enum":["does-not-match-description","unintended-behaviour","security","data-loss","money","sending","sign-in","fake-tests","rule-broken","bug","lost-change"]},"file":{"type":"string"},"line":{"type":"integer"},"what":{"type":"string"},"fix":{"type":"string"}}}},"notes":{"type":"array","description":"Optional non-blocking remarks, at most 5.","items":{"type":"string"}}}}'
+            1. team            team account token, the FURRINGLINE Team seat (CLAUDE_CODE_OAUTH_TOKEN_WORK), only while
+                               its plan has room
+            2. work            work account token, the work account's own Max plan (CLAUDE_CODE_OAUTH_TOKEN_WORKMAX,
+                               added 2026-10-25), only while its plan has room; weekly-limit tier only
+            3. personal        personal plan token (CLAUDE_CODE_OAUTH_TOKEN), only while its plan has room
+            4. console-work    work Console API key (ANTHROPIC_API_KEY_CONSOLE_WORK), monthly API credits
+            5. console         personal Console API key (ANTHROPIC_API_KEY_CONSOLE)
+            6. team-extra      team account token with extra usage (skipped when the seat has extra usage off)
+            7. personal-extra  personal plan token with extra usage, last
+
+          Names follow his account names (2026-10-25: team, work, personal). The secret names stay as they were, so
+          running workflows keep working: CLAUDE_CODE_OAUTH_TOKEN_WORK is the team account, _WORKMAX the work account.
+          A CLAUDE_KEY_CHAIN written with the old names (work = the Team seat, workmax, work-extra) is read the old way
+          when it names no `team` entry.
+
+          A plan token does not fail at the weekly limit: it silently bills extra usage. So for a `room` key a
+          1-token Haiku call reads the plan meter from its rate-limit headers first, and the key is skipped
+          when the plan is at its limit, the meter is at the cap, extra usage is in use, or the read fails.
+          Status `allowed_warning` (only near a limit) still counts as room; the cap decides.
+          An `extra` key is skipped only when the meter says extra usage is turned off.
+
+          The next key runs when one ends on a usage limit, a credit or sign-in failure, or with no turns.
+          Any other failure stops the chain, so a broken prompt never spends every key.
+
+          Change the order with CLAUDE_KEY_CHAIN (comma list; repository or organisation variable). An
+          entry is a name above, or `name:ENV_VAR:plan|api[:room|extra]` for a new account; the workflow must
+          then pass ENV_VAR as an env line. KEY_ROOM_CAP (default 0.97) is the meter share at which a
+          `room` key is skipped.
+
+          review.yml carries a copy of this file (embed.py keeps it in step); tests guard the copy.
+          Python 3.9+, standard library only. Never prints a key.
+          """
+          from __future__ import annotations
+
+          import json
+          import os
+          import re
+          import shlex
+          import subprocess
+          import sys
+          import urllib.error
+          import urllib.request
+
+          KEYS = {
+              "team": {"env": "CLAUDE_CODE_OAUTH_TOKEN_WORK", "kind": "plan", "check": "room"},
+              "work": {"env": "CLAUDE_CODE_OAUTH_TOKEN_WORKMAX", "kind": "plan", "check": "room"},
+              "personal": {"env": "CLAUDE_CODE_OAUTH_TOKEN", "kind": "plan", "check": "room"},
+              "console-work": {"env": "ANTHROPIC_API_KEY_CONSOLE_WORK", "kind": "api", "check": ""},
+              "console": {"env": "ANTHROPIC_API_KEY_CONSOLE", "kind": "api", "check": ""},
+              "team-extra": {"env": "CLAUDE_CODE_OAUTH_TOKEN_WORK", "kind": "plan", "check": "extra"},
+              "personal-extra": {"env": "CLAUDE_CODE_OAUTH_TOKEN", "kind": "plan", "check": "extra"},
+          }
+          DEFAULT_CHAIN = "team,work,personal,console-work,console,team-extra,personal-extra"
+          OLD_NAMES = {"work": "team", "workmax": "work", "work-extra": "team-extra"}  # before 2026-10-25
+          KEY_VARS = {"CLAUDE_CODE_OAUTH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN_WORK", "CLAUDE_CODE_OAUTH_TOKEN_WORKMAX",
+                      "ANTHROPIC_API_KEY", "ANTHROPIC_API_KEY_CONSOLE", "ANTHROPIC_API_KEY_CONSOLE_WORK", "ANTHROPIC_AUTH_TOKEN"}
+          FALL_BACK = re.compile(r"usage limit|hit your limit|limit reached|limit will reset|quota|rate.?limit|credit balance"
+                                 r"|\b40[13]\b|unauthori[sz]ed|authenticat|oauth|invalid (api key|token|bearer|x-api-key)"
+                                 r"|token (has )?expired|/login|not logged in|forbidden|billing", re.I)
+          METER_URL = "https://api.anthropic.com/v1/messages"
+          H = "anthropic-ratelimit-unified-"
+
+
+          def chain(environ=None) -> list:
+              """[{name, env, kind, check}] in order; entries whose env var is empty are kept (run() skips them)."""
+              environ = os.environ if environ is None else environ
+              out = []
+              names = [r.strip() for r in (environ.get("CLAUDE_KEY_CHAIN") or DEFAULT_CHAIN).split(",")]
+              old = not any(n.split(":")[0] in ("team", "team-extra") for n in names)  # a chain set before the rename
+              for raw in names:
+                  if old and raw in OLD_NAMES:
+                      raw = OLD_NAMES[raw]
+                  if not raw:
+                      continue
+                  if ":" in raw:
+                      parts = raw.split(":")
+                      if len(parts) < 3 or parts[2] not in ("plan", "api") or parts[3:4] not in ([], ["room"], ["extra"]):
+                          raise ValueError(f"bad CLAUDE_KEY_CHAIN entry {raw!r}: use name:ENV_VAR:plan|api[:room|extra]")
+                      out.append({"name": parts[0], "env": parts[1], "kind": parts[2], "check": (parts[3:4] or [""])[0]})
+                  elif raw in KEYS:
+                      out.append(dict(KEYS[raw], name=raw))
+                  else:
+                      raise ValueError(f"unknown key {raw!r} in CLAUDE_KEY_CHAIN (known: {', '.join(KEYS)})")
+              return out
+
+
+          def read_meter(token: str, opener=urllib.request.urlopen) -> dict:
+              """The plan meter from a 1-token Haiku call's headers: {status, overage, overage_status, week, five_hour}
+              or {error}."""
+              req = urllib.request.Request(METER_URL, data=json.dumps({
+                  "model": "claude-haiku-4-5", "max_tokens": 1, "messages": [{"role": "user", "content": "."}]}).encode(),
+                  headers={"Authorization": "Bearer " + token, "anthropic-beta": "oauth-2025-04-20",
+                           "anthropic-version": "2023-06-01", "Content-Type": "application/json", "User-Agent": "key-chain/1"})
+              try:
+                  with opener(req, timeout=30) as r:
+                      h = {k.lower(): v for k, v in dict(r.headers).items()}
+              except urllib.error.HTTPError as e:
+                  h = {k.lower(): v for k, v in dict(e.headers or {}).items()}
+                  if not h.get(H + "status"):
+                      return {"error": f"meter read failed: HTTP {e.code}"}
+              except Exception as e:  # network, timeout
+                  return {"error": f"meter read failed: {type(e).__name__}"}
+
+              def num(k):
+                  try:
+                      return float(h.get(H + k))
+                  except (TypeError, ValueError):
+                      return None
+              if not h.get(H + "status"):
+                  return {"error": "meter read failed: no plan headers"}
+              return {"status": h.get(H + "status"), "overage": h.get(H + "overage-in-use") == "true",
+                      "overage_status": h.get(H + "overage-status"), "week": num("7d-utilization"),
+                      "five_hour": num("5h-utilization")}
+
+
+          def extra_reason(meter: dict) -> str:
+              """'' when the plan may bill extra usage (or the meter is unknown, so trying costs nothing), else why not."""
+              if meter.get("status") != "allowed" and meter.get("overage_status") == "rejected":
+                  return "plan limit reached and extra usage is off"
+              return ""
+
+
+          def room_reason(meter: dict, cap: float) -> str:
+              """'' when the plan has room, else why the key is skipped."""
+              if meter.get("error"):
+                  return meter["error"]
+              if meter.get("status") not in ("allowed", "allowed_warning"):  # allowed_warning: near a limit, still room
+                  return f"plan limit reached (status {meter.get('status')})"
+              if meter.get("overage"):
+                  return "extra usage already in use"
+              for k, label in (("week", "weekly"), ("five_hour", "5-hour")):
+                  v = meter.get(k)
+                  if v is not None and v >= cap:
+                      return f"{label} meter at {round(v * 100)}% (cap {round(cap * 100)}%)"
+              return ""
+
+
+          def should_fall_back(res: dict) -> bool:
+              """True when a run ended on a usage limit, a credit or a sign-in failure, so the next key may work."""
+              if not isinstance(res, dict) or res.get("structured_output") or not res.get("is_error"):
+                  return False
+              return bool(FALL_BACK.search(str(res.get("result") or res.get("subtype") or ""))) or not res.get("num_turns")
+
+
+          def run_claude(cmd: list, environ: dict, entry: dict, token: str, cwd=None, timeout=45 * 60) -> dict:
+              env = {k: v for k, v in environ.items() if k not in KEY_VARS and k != entry["env"]}
+              env["ANTHROPIC_API_KEY" if entry["kind"] == "api" else "CLAUDE_CODE_OAUTH_TOKEN"] = token
+              try:
+                  p = subprocess.run(cmd, cwd=cwd, env=env, capture_output=True, text=True, timeout=timeout)
+                  stdout, stderr = p.stdout or "", p.stderr or ""
+              except subprocess.TimeoutExpired:
+                  stdout, stderr = "", f"Claude ran longer than {timeout // 60} minutes"
+              try:
+                  res = json.loads(stdout)
+              except ValueError:
+                  res = {"type": "result", "is_error": True, "result": (stderr or stdout or "no output")[-300:]}
+              if not isinstance(res, dict):
+                  res = {"type": "result", "is_error": True, "result": str(res)[-300:]}
+              if isinstance(res.get("result"), str):
+                  res["result"] = res["result"].replace(token, "[key]")
+              return res
+
+
+          def run(cmd: list, environ=None, runner=None, meter=None, say=print, cwd=None) -> dict:
+              """Try each key in order; the last result, with `key` (the one that ran) and `tried` (one line per key)."""
+              runner, meter = runner or run_claude, meter or read_meter
+              environ = dict(os.environ if environ is None else environ)
+              cap = float(environ.get("KEY_ROOM_CAP") or 0.97)
+              entries = chain(environ)
+              tried, res = [], None
+              for i, e in enumerate(entries):
+                  token = environ.get(e["env"]) or ""
+                  if not token:
+                      tried.append(f"{e['name']}: no {e['env']} secret")
+                      continue
+                  if e["check"]:
+                      m = meter(token)
+                      why = room_reason(m, cap) if e["check"] == "room" else extra_reason(m)
+                      if why:
+                          tried.append(f"{e['name']}: skipped, {why}")
+                          say(f"key-chain: {tried[-1]}")
+                          continue
+                  res = runner(cmd, environ, e, token, cwd=cwd)
+                  res["key"] = e["name"]
+                  more = any(environ.get(x["env"]) for x in entries[i + 1:])
+                  if more and should_fall_back(res):
+                      tried.append(f"{e['name']}: {str(res.get('result'))[:120]}")
+                      say(f"key-chain: {tried[-1]}; trying the next key")
+                      continue
+                  tried.append(f"{e['name']}: ran")
+                  break
+              if res is None:
+                  res = {"type": "result", "is_error": True, "num_turns": 0, "key": "none",
+                         "result": "no key could run: " + "; ".join(tried)}
+              res["tried"] = tried
+              return res
+
+
+          def main(argv=None) -> int:
+              argv = list(sys.argv[1:] if argv is None else argv)
+              if argv[:1] == ["plan"]:
+                  for e in chain():
+                      print(f"{e['name']}: {e['env']} ({e['kind']}{', only with room' if e['check'] == 'room' else ''}"
+                            f"{', extra usage' if e['check'] == 'extra' else ''})"
+                            f"{'' if os.environ.get(e['env']) else ' - not set'}")
+                  return 0
+              if argv[:1] != ["run"] or "--" not in argv:
+                  print(__doc__)
+                  return 2
+              opts, cmd = argv[1:argv.index("--")], argv[argv.index("--") + 1:]
+              out = opts[opts.index("--out") + 1] if "--out" in opts else ""
+              if "--args-env" in opts:
+                  cmd += shlex.split(os.environ.get(opts[opts.index("--args-env") + 1]) or "")
+              res = run(cmd)
+              if out:
+                  with open(out, "w") as f:
+                      json.dump(res, f)
+              s = res.get("structured_output")
+              print(f"key-chain: ran on {res['key']}; " + " | ".join(res["tried"]))
+              if os.environ.get("GITHUB_OUTPUT"):
+                  with open(os.environ["GITHUB_OUTPUT"], "a") as g:
+                      g.write(f"key={res['key']}\n")
+                      g.write("tried=" + " | ".join(res["tried"]).replace("\n", " ") + "\n")
+                      g.write("structured_output=" + (json.dumps(s, separators=(",", ":")) if s else "") + "\n")
+                      g.write(f"execution_file={out}\n")
+              return 0 if s or not res.get("is_error") else 1
+
+
+          if __name__ == "__main__":
+              sys.exit(main())
+          KEYCHAIN
+          # A PR whose only reviewed files are agent rules gets the rule review alone (next step reuses key_chain.py).
+          if [ "$CODE" != "false" ]; then
+            python3 "$RUNNER_TEMP/key_chain.py" run --out "$RUNNER_TEMP/review-result.json" --args-env REVIEW_ARGS \
+              -- "$CLAUDE_BIN" -p "$REVIEW_PROMPT$TRUSTED_NOTE" --output-format json
+          fi
+
+      # The rule review (2026-10-25): agent rules get a second, separate look at scope, incentives and edge
+      # cases (prompt: nuey-skills scripts/rule-review/prompt.md). It runs after the code review when a PR has
+      # both, down the same key chain.
+      - name: Rule review
+        id: rules
+        if: steps.scope.outputs.skip != 'true' && steps.scope.outputs.missing_token != 'true' && steps.scope.outputs.rules == 'true'
+        continue-on-error: true
+        env:
+          CLAUDE_CODE_OAUTH_TOKEN_WORK: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN_WORK }}
+          CLAUDE_CODE_OAUTH_TOKEN_WORKMAX: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN_WORKMAX }}
+          CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          ANTHROPIC_API_KEY_CONSOLE_WORK: ${{ secrets.ANTHROPIC_API_KEY_CONSOLE_WORK }}
+          ANTHROPIC_API_KEY_CONSOLE: ${{ secrets.ANTHROPIC_API_KEY_CONSOLE }}
+          CLAUDE_KEY_CHAIN: ${{ vars.CLAUDE_KEY_CHAIN }}
+          KEY_ROOM_CAP: ${{ vars.KEY_ROOM_CAP }}
+        shell: bash
+        run: |
+          python3 "$RUNNER_TEMP/key_chain.py" run --out "$RUNNER_TEMP/rule-result.json" --args-env RULE_ARGS \
+            -- "$CLAUDE_BIN" -p "$RULE_PROMPT$TRUSTED_NOTE" --output-format json
 
       - name: Verdict
         if: ${{ !cancelled() }}
@@ -245,24 +717,38 @@ jobs:
           OUTCOME: ${{ steps.claude.outcome }}
           STRUCTURED: ${{ steps.claude.outputs.structured_output }}
           EXECUTION_FILE: ${{ steps.claude.outputs.execution_file }}
+          PLAN_TOKEN: ${{ steps.claude.outputs.key }}
+          KEYS_TRIED: ${{ steps.claude.outputs.tried }}
+          CODE: ${{ steps.scope.outputs.code }}
+          RULES: ${{ steps.scope.outputs.rules }}
+          RULE_OUTCOME: ${{ steps.rules.outcome }}
+          RULE_STRUCTURED: ${{ steps.rules.outputs.structured_output }}
+          RULE_EXECUTION_FILE: ${{ steps.rules.outputs.execution_file }}
+          RULE_PLAN_TOKEN: ${{ steps.rules.outputs.key }}
+          RULE_KEYS_TRIED: ${{ steps.rules.outputs.tried }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+          MARK: ${{ github.event_name == 'pull_request_target' && '<!-- second-reviewer:main -->' || '<!-- second-reviewer -->' }}
+          LABEL: ${{ github.event_name == 'pull_request_target' && 'Second review (main''s reviewer, gate files changed)' || 'Second review' }}
         shell: bash
         run: |
           python3 - <<'PY'
           import json, os, subprocess, sys
           env = os.environ
-          MARK = "<!-- second-reviewer -->"
-          def usage():
+          MARK = env.get("MARK") or "<!-- second-reviewer -->"
+          LABEL = env.get("LABEL") or "Second review"
+          def usage(path):
               info = {}
               try:
-                  msgs = json.load(open(env.get("EXECUTION_FILE") or ""))
+                  msgs = json.load(open(path or ""))
               except Exception:
                   return info
-              for m in msgs if isinstance(msgs, list) else []:
+              for m in msgs if isinstance(msgs, list) else [msgs]:
                   if m.get("type") == "system" and m.get("subtype") == "init":
                       info["model"] = m.get("model")
                   if m.get("type") == "result":
+                      if m.get("modelUsage") and not info.get("model"):
+                          info["model"] = ", ".join(m["modelUsage"])
                       u = m.get("usage") or {}
                       info.update(turns=m.get("num_turns"), seconds=round((m.get("duration_ms") or 0) / 1000),
                                   tokens_in=(u.get("input_tokens") or 0) + (u.get("cache_read_input_tokens") or 0)
@@ -272,44 +758,78 @@ jobs:
                       if m.get("is_error"):
                           info["error"] = str(m.get("result") or m.get("subtype"))[:300]
               return info
-          sha = (env.get("HEAD_SHA") or "")[:7]
-          u = usage()
-          if env.get("SKIP") == "true":
-              verdict, lines = "skip", [f"Skipped: {env.get('REASON')}. No Claude usage."]
-          elif env.get("MISSING_TOKEN") == "true":
-              verdict, lines = "fail", ["**Could not review:** this repository has no `CLAUDE_CODE_OAUTH_TOKEN` "
-                                        "Actions secret. Set it (nuey-skills `scripts/second-reviewer/set-secrets.sh`), then re-run this job."]
-          else:
+          def judged(structured, outcome, u, tried, scenario=False):
+              """(verdict, lines) of one review run; no verdict is "Could not review", never a pass."""
               try:
-                  out = json.loads(env.get("STRUCTURED") or "")
+                  out = json.loads(structured or "")
               except ValueError:
                   out = None
               if not out or out.get("verdict") not in ("pass", "fail"):
-                  why = u.get("error") or f"the review step ended with '{env.get('OUTCOME')}' and no verdict"
-                  verdict, lines = "fail", [f"**Could not review:** {why}. Re-run this job (it may be a plan "
-                                            f"usage limit or an outage). Log: {env['RUN_URL']}"]
+                  why = u.get("error") or f"the review step ended with '{outcome}' and no verdict"
+                  if tried:
+                      why += f" (keys: {tried})"
+                  return "fail", [f"**Could not review:** {why}. Re-run this job (it may be a plan "
+                                  f"usage limit or an outage). Log: {env['RUN_URL']}"]
+              lines = [out.get("summary", "").strip()]
+              for i, p in enumerate(out.get("problems") or [], 1):
+                  where = p.get("file", "") + (f":{p['line']}" if p.get("line") else "")
+                  lines.append(f"\n{i}. **{p.get('kind')}** `{where}`: {p.get('what')}"
+                               + (f"\n   Scenario: {p.get('scenario')}" if scenario and p.get("scenario") else "")
+                               + f"\n   Fix: {p.get('fix')}")
+              if out.get("notes"):
+                  lines.append("\nNotes (not blocking):")
+                  lines += [f"- {n}" for n in out["notes"][:5]]
+              return out["verdict"], lines
+          def meta_of(u, key, tried):
+              m = []
+              if u.get("model"):
+                  m.append(f"model {u['model']}")
+              if key:
+                  m.append(f"key {key}" + (f" (tried: {tried})" if (tried or "").count("|") else ""))
+              if u.get("turns") is not None:
+                  m.append(f"{u['turns']} turns, {u.get('seconds')} s, {u.get('tokens_in')} in / {u.get('tokens_out')} out tokens")
+              return m
+          sha = (env.get("HEAD_SHA") or "")[:7]
+          runs = []  # (kind, verdict, lines, usage, key, tried)
+          if env.get("SKIP") == "true":
+              verdict, lines = "skip", [f"Skipped: {env.get('REASON')}. No Claude usage."]
+          elif env.get("MISSING_TOKEN") == "true":
+              verdict, lines = "fail", ["**Could not review:** this repository has no `CLAUDE_CODE_OAUTH_TOKEN_WORK`, "
+                                        "`CLAUDE_CODE_OAUTH_TOKEN` or `ANTHROPIC_API_KEY_CONSOLE` Actions secret. Set it (nuey-skills `scripts/second-reviewer/set-secrets.sh`), then re-run this job."]
+          else:
+              if env.get("CODE") != "false":
+                  u = usage(env.get("EXECUTION_FILE"))
+                  runs.append(("code", *judged(env.get("STRUCTURED"), env.get("OUTCOME"), u, env.get("KEYS_TRIED")),
+                               u, env.get("PLAN_TOKEN"), env.get("KEYS_TRIED")))
+              if env.get("RULES") == "true":
+                  u = usage(env.get("RULE_EXECUTION_FILE"))
+                  runs.append(("rules", *judged(env.get("RULE_STRUCTURED"), env.get("RULE_OUTCOME"), u,
+                                                env.get("RULE_KEYS_TRIED"), scenario=True),
+                               u, env.get("RULE_PLAN_TOKEN"), env.get("RULE_KEYS_TRIED")))
+              verdict = "fail" if any(r[1] == "fail" for r in runs) else "pass"
+              if len(runs) == 1 and runs[0][0] == "code":
+                  lines = runs[0][2]
               else:
-                  verdict = out["verdict"]
-                  lines = [out.get("summary", "").strip()]
-                  for i, p in enumerate(out.get("problems") or [], 1):
-                      where = p.get("file", "") + (f":{p['line']}" if p.get("line") else "")
-                      lines.append(f"\n{i}. **{p.get('kind')}** `{where}`: {p.get('what')}\n   Fix: {p.get('fix')}")
-                  if out.get("notes"):
-                      lines.append("\nNotes (not blocking):")
-                      lines += [f"- {n}" for n in out["notes"][:5]]
-          head = {"pass": "Second review: pass", "fail": "Second review: FAIL", "skip": "Second review: skipped"}[verdict]
+                  lines = []
+                  for kind, v, ls, *_ in runs:
+                      title = {"code": "Code review", "rules": "Rule review (agent rules: scope, incentives, edge cases)"}[kind]
+                      lines += [f"#### {title}: {'pass' if v == 'pass' else 'FAIL'}\n"] + ls + [""]
+          head = f"{LABEL}: " + {"pass": "pass", "fail": "FAIL", "skip": "skipped"}[verdict]
           meta = []
-          if u.get("model"):
-              meta.append(f"model {u['model']}")
-          if u.get("turns") is not None:
-              meta.append(f"{u['turns']} turns, {u.get('seconds')} s, {u.get('tokens_in')} in / {u.get('tokens_out')} out tokens")
+          for kind, _, _, u, key, tried in runs:
+              part = meta_of(u, key, tried)
+              if part and len(runs) > 1:
+                  part[0] = f"{kind}: {part[0]}"
+              meta += part
           meta += ["commit " + sha, "[log](" + env["RUN_URL"] + ")"]
           footer = "\n\n<sub>" + " · ".join(meta) + "</sub>"
           body = f"{MARK}\n### {head}\n\n" + "\n".join(lines) + footer
           with open(env["GITHUB_STEP_SUMMARY"], "a") as f:
               f.write(body + "\n")
-          usage_line = json.dumps({"verdict": verdict, **{k: u.get(k) for k in ("model", "turns", "tokens_in", "tokens_out", "api_equiv_usd")}})
-          print("second-reviewer-usage " + usage_line)
+          for kind, v, _, u, key, _ in runs or [("code", verdict, None, {}, env.get("PLAN_TOKEN"), "")]:
+              usage_line = json.dumps({"verdict": v, "kind": kind, "plan_token": key,
+                                       **{k: u.get(k) for k in ("model", "turns", "tokens_in", "tokens_out", "api_equiv_usd")}})
+              print("second-reviewer-usage " + usage_line)
           pr = env.get("PR")
           if pr and verdict != "skip":
               cid = subprocess.run(["gh", "api", f"repos/{env['REPO']}/issues/{pr}/comments", "--paginate", "--jq",
