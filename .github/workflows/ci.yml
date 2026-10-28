@@ -15,12 +15,15 @@ on:
       main_green:
         type: boolean
         default: false
+      pr_ref:
+        type: string
+        default: ""
 
 permissions:
   contents: read
 
 concurrency:
-  group: ci-${{ github.ref }}${{ inputs.main_green && format('-main-green-{0}', github.run_id) || '' }}
+  group: ci-${{ github.ref }}${{ inputs.main_green && format('-main-green-{0}', github.run_id) || '' }}${{ inputs.pr_ref && format('-from-main-{0}', inputs.pr_ref) || '' }}
   cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 jobs:
@@ -37,6 +40,8 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          ref: ${{ inputs.pr_ref || '' }}
+          persist-credentials: ${{ !inputs.pr_ref }}
       - name: Docs-only change?
         id: docs
         shell: bash
