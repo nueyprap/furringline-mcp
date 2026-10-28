@@ -31,6 +31,15 @@ jobs:
           PR_BODY: ${{ github.event.pull_request.body }}
         run: python3 .jev/jev_gate.py --mode ci --require-review --base "origin/$BASE_REF"
 
+      # Plain text, no model (Narathip, 2026-10-28): use a Claude plan login only through Claude Code. Fails on
+      # lines this pull request adds that send one by hand (scripts/plan-login-check in nuey-skills). Runs even
+      # when the Jev step fails, so both answers come in one round.
+      - name: Plan login check
+        if: ${{ !cancelled() }}
+        env:
+          BASE_REF: ${{ github.base_ref }}
+        run: python3 .jev/plan_login_check.py --base "origin/$BASE_REF" --github
+
       - name: Upload Jev gate log
         if: always()
         uses: actions/upload-artifact@v4

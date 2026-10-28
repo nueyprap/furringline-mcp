@@ -95,10 +95,19 @@ jobs:
            workflow, a plist, a routine template, a wrangler file) is backed up with its repository,
            and new repositories, Workers, D1 databases and KV namespaces are copied by themselves;
            what counts is data kept outside Git that nothing copies yet.
+        8. Does the diff add a `plan-login-ok:` marker? Each one excuses a line from the plan-login
+           check (a Claude plan login is used only through Claude Code: handed to the `claude` program
+           or the official Claude GitHub Action, never sent by our own code). Read the marked line and the code
+           around it. It is fine only when the code never sends, forwards or copies the login, for
+           example it reads expiry times from Claude Code's saved login. A marked line that sends the
+           token, builds a header from it, or calls an Anthropic or claude.ai endpoint with it is a
+           real problem: kind "rule-broken"; the fix is to hand the login to the `claude` program
+           (for a meter, `claude -p --output-format stream-json --verbose`) or use an API key.
 
         verdict "fail" only for a real problem: a bug, a risk from question 3, fake tests, a broken
         rule, a change lost in a merge (question 6; leftover conflict markers always fail), new
-        data with no backup (question 7), or a change that does not do what it claims. Style,
+        data with no backup (question 7), a plan-login-ok marker on a line that sends the login
+        (question 8), or a change that does not do what it claims. Style,
         naming, small refactors and "could be nicer" are not failures: put them in notes. When unsure whether something is real, read
         more code before deciding. Each problem needs the file, the line when you can, what is wrong
         in one or two plain sentences, and the exact fix the author agent should make.
@@ -464,8 +473,9 @@ jobs:
           A CLAUDE_KEY_CHAIN written with the old names (work = the Team seat, workmax, work-extra) is read the old way
           when it names no `team` entry.
 
-          A plan token does not fail at the weekly limit: it silently bills extra usage. So for a `room` key a
-          1-token Haiku call reads the plan meter from its rate-limit headers first, and the key is skipped
+          A plan token does not fail at the weekly limit: it silently bills extra usage. So for a `room` key one tiny
+          Haiku turn through Claude Code (`claude -p --output-format stream-json --verbose`, the token in
+          CLAUDE_CODE_OAUTH_TOKEN) reads the plan meter from its rate_limit_event first, and the key is skipped
           when the plan is at its limit, the meter is at the cap, extra usage is in use, or the read fails.
           Status `allowed_warning` (only near a limit) still counts as room; the cap decides.
           An `extra` key is skipped only when the meter says extra usage is turned off.
@@ -495,6 +505,7 @@ jobs:
           import shlex
           import subprocess
           import sys
+          import tempfile
           import time
           import urllib.error
           import urllib.request
@@ -515,8 +526,8 @@ jobs:
           FALL_BACK = re.compile(r"usage limit|hit your limit|limit reached|limit will reset|quota|rate.?limit|credit balance"
                                  r"|\b40[13]\b|unauthori[sz]ed|authenticat|oauth|invalid (api key|token|bearer|x-api-key)"
                                  r"|token (has )?expired|/login|not logged in|forbidden|billing", re.I)
-          METER_URL = "https://api.anthropic.com/v1/messages"
-          H = "anthropic-ratelimit-unified-"
+          METER_PROMPT = "Reply with the single word ok."
+          METER_TIMEOUT = 120
           USAGE_URL = "https://ptpeikfudimviopqjpgc.supabase.co/functions/v1/claude-usage"
           USAGE_KEY = "CLAUDE_USAGE_KEY"
           # Dollars per million tokens: input, output, cache read, cache write (Narathip's list, 2026-10-27). Matched by
@@ -551,33 +562,50 @@ jobs:
               return out
 
 
-          def read_meter(token: str, opener=urllib.request.urlopen) -> dict:
-              """The plan meter from a 1-token Haiku call's headers: {status, overage, overage_status, week, five_hour}
-              or {error}."""
-              req = urllib.request.Request(METER_URL, data=json.dumps({
-                  "model": "claude-haiku-4-5", "max_tokens": 1, "messages": [{"role": "user", "content": "."}]}).encode(),
-                  headers={"Authorization": "Bearer " + token, "anthropic-beta": "oauth-2025-04-20",
-                           "anthropic-version": "2023-06-01", "Content-Type": "application/json", "User-Agent": "key-chain/1"})
-              try:
-                  with opener(req, timeout=30) as r:
-                      h = {k.lower(): v for k, v in dict(r.headers).items()}
-              except urllib.error.HTTPError as e:
-                  h = {k.lower(): v for k, v in dict(e.headers or {}).items()}
-                  if not h.get(H + "status"):
-                      return {"error": f"meter read failed: HTTP {e.code}"}
-              except Exception as e:  # network, timeout
-                  return {"error": f"meter read failed: {type(e).__name__}"}
-
-              def num(k):
+          def read_meter(token: str, claude: str = "claude", runner=subprocess.run, environ=None) -> dict:
+              """The plan meter from one tiny Haiku turn through Claude Code: {status, overage, overage_status, week,
+              five_hour} or {error}. The token goes to the `claude` program only (CLAUDE_CODE_OAUTH_TOKEN), never into a
+              request we build: a plan login is used only through Claude Code (2026-10-28). environ is the run's own
+              environment, so a caller that removed its secrets before run() keeps them away from this child too."""
+              env = {k: v for k, v in (os.environ if environ is None else environ).items() if k not in KEY_VARS and k != USAGE_KEY}
+              env["CLAUDE_CODE_OAUTH_TOKEN"] = token
+              with tempfile.TemporaryDirectory() as cwd:  # no project settings, hooks or MCP servers load
                   try:
-                      return float(h.get(H + k))
-                  except (TypeError, ValueError):
-                      return None
-              if not h.get(H + "status"):
-                  return {"error": "meter read failed: no plan headers"}
-              return {"status": h.get(H + "status"), "overage": h.get(H + "overage-in-use") == "true",
-                      "overage_status": h.get(H + "overage-status"), "week": num("7d-utilization"),
-                      "five_hour": num("5h-utilization")}
+                      p = runner([claude, "-p", METER_PROMPT, "--model", "haiku", "--max-turns", "1", "--tools", "",
+                                  "--setting-sources", "", "--strict-mcp-config", "--no-session-persistence",
+                                  "--disable-slash-commands", "--output-format", "stream-json", "--verbose"],
+                                 cwd=cwd, env=env, stdin=subprocess.DEVNULL, capture_output=True, text=True,
+                                 timeout=METER_TIMEOUT)
+                      out = p.stdout or ""
+                  except subprocess.TimeoutExpired:
+                      return {"error": f"meter read failed: no answer in {METER_TIMEOUT} s"}
+                  except Exception as e:  # claude missing, cannot start
+                      return {"error": f"meter read failed: {type(e).__name__}"}
+              last = ""
+              for line in out.splitlines():
+                  try:
+                      ev = json.loads(line)
+                  except ValueError:
+                      continue
+                  if not isinstance(ev, dict):
+                      continue
+                  if ev.get("type") == "result":
+                      last = str(ev.get("result") or ev.get("subtype") or "")
+                  if ev.get("type") != "rate_limit_event":
+                      continue
+                  info = ev.get("rate_limit_info") or {}
+                  w = info.get("unifiedWindows") or {}
+
+                  def num(window):
+                      v = (w.get(window) or {}).get("utilization")
+                      return float(v) if isinstance(v, (int, float)) else None
+                  if not info.get("status"):
+                      break
+                  return {"status": info.get("status"), "overage": info.get("isUsingOverage") is True,
+                          "overage_status": info.get("overageStatus"), "week": num("seven_day"),
+                          "five_hour": num("five_hour")}
+              why = (last or (p.stderr or "")[-200:] or "no rate_limit_event").replace(token, "[key]").strip()
+              return {"error": "meter read failed: " + " ".join(why.split())[:120]}
 
 
           def extra_reason(meter: dict) -> str:
@@ -726,8 +754,9 @@ jobs:
               if log is None and runner is None:
                   def log(row):
                       report(row, environ, say=say)
-              runner, meter = runner or run_claude, meter or read_meter
+              runner = runner or run_claude
               environ = dict(os.environ if environ is None else environ)
+              meter = meter or (lambda token: read_meter(token, cmd[0] if cmd else "claude", environ=environ))
               cap = float(environ.get("KEY_ROOM_CAP") or 0.97)
               entries = chain(environ)
               tried, res = [], None
@@ -737,7 +766,9 @@ jobs:
                       tried.append(f"{e['name']}: no {e['env']} secret")
                       continue
                   if e["check"]:
+                      t0 = time.time()
                       m = meter(token)
+                      say(f"key-chain: {e['name']} meter read in {time.time() - t0:.0f} s")
                       why = room_reason(m, cap) if e["check"] == "room" else extra_reason(m)
                       if why:
                           tried.append(f"{e['name']}: skipped, {why}")
