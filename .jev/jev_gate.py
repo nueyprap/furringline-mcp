@@ -17,11 +17,12 @@ a copy in .jev/jev_gate.py that install.py keeps up to date.
 """
 from __future__ import annotations
 
-VERSION = "0.1.6"
+VERSION = "0.1.7"
 
 import argparse
 import concurrent.futures
 import hashlib
+import fnmatch
 import hmac
 import json
 import os
@@ -39,9 +40,13 @@ ENDPOINT = "https://api.typesafe.ai/v1/systemone"
 
 BLOCK_T = 0.85          # a BLOCK question at or above this fails the change
 WARN_T = 0.50           # a WARN question (or a BLOCK one below BLOCK_T) at or above this warns
-STATE_BYTES = 80_000    # keep each request's state under this (Jev: 32k tokens for state + question)
-MIN_CHUNK_BYTES = 30_000
-MAX_CHUNKS = 12         # diffs past this many chunks are only regex-scanned
+# A state near 70 KB is rejected live with max_tokens_exceeded (2026-10-19, the
+# purchases CSV). Stay well under that. Questions and rules already use ~3k tokens.
+STATE_BYTES = 12_000
+MIN_CHUNK_BYTES = 4_000
+# Keep small provider-safe requests, but allow complete review of a large repair.
+# Deadlines, concurrency and fail-closed coverage checks remain unchanged.
+MAX_CHUNKS = 512        # diffs past this many chunks are only regex-scanned
 RULES_CHARS = 6_000
 TASK_CHARS = 4_000
 FILES_LIST_CHARS = 12_000
@@ -405,6 +410,7 @@ class FileDiff:
     def __init__(self, text):
         self.text = text
         self.path = _diff_path(text)
+        self.data = False       # set by evaluate() for a configured data path (regex-scanned only)
         self.binary = bool(re.search(r"(?m)^(Binary files .* differ|GIT binary patch)$", text))
         self.added, self.removed = 0, 0
         self.added_lines = []   # (new line number, content)
@@ -507,6 +513,8 @@ def files_summary(files):
     for f in files:
         if f.binary:
             note = " (binary, not shown)"
+        elif f.data:
+            note = " (data export, secret-scanned only, not shown)"
         elif f.excluded:
             note = f" ({exclusion_reason(f.path)}, not shown)"
         else:
@@ -520,19 +528,51 @@ def files_summary(files):
     return lines
 
 
-def _truncate_utf8(text, limit):
-    return text.encode("utf-8")[:limit].decode("utf-8", errors="ignore")
+def _pieces(text, limit):
+    """Split one diff into pieces of at most `limit` bytes. Prefer line breaks so one row stays whole."""
+    if len(text.encode("utf-8")) <= limit:
+        return [text]
+    pieces, buf, size = [], [], 0
+    for line in text.splitlines(keepends=True):
+        raw = line.encode("utf-8")
+        n = len(raw)
+        if n > limit:
+            if buf:
+                pieces.append("".join(buf))
+                buf, size = [], 0
+            start = 0
+            while start < n:
+                end = min(n, start + limit)
+                while end > start and (raw[end - 1] & 0xC0) == 0x80:
+                    end -= 1
+                if end == start:
+                    end = min(n, start + limit)
+                pieces.append(raw[start:end].decode("utf-8", errors="ignore"))
+                start = end
+            continue
+        if buf and size + n > limit:
+            pieces.append("".join(buf))
+            buf, size = [], 0
+        buf.append(line)
+        size += n
+    if buf:
+        pieces.append("".join(buf))
+    return pieces
 
 
 def make_chunks(texts, limit):
-    """Pack per-file diff texts into chunks of at most `limit` bytes, in order."""
-    chunks, current, size = [], [], 0
+    """Pack diff texts into chunks of at most `limit` bytes, in order.
+
+    A single file larger than `limit` is split across chunks so the review can
+    still see every line. Nothing is dropped here; the caller drops only the
+    chunks past MAX_CHUNKS.
+    """
+    pieces = []
     for text in texts:
+        pieces.extend(_pieces(text, limit))
+    chunks, current, size = [], [], 0
+    for text in pieces:
         n = len(text.encode("utf-8"))
-        if n > limit:
-            text = (_truncate_utf8(text, limit - 200) +
-                    f"\n[jev-gate: the rest of this file's diff ({n - limit + 200} bytes) was cut to fit the size limit]\n")
-            n = len(text.encode("utf-8"))
         if current and size + n > limit:
             chunks.append("".join(current))
             current, size = [], 0
@@ -679,7 +719,12 @@ def ask_jev(key, state, qids, deadline):
                 data = json.loads(resp.read(MAX_RESPONSE_BYTES).decode("utf-8"))
             return _parse_answers(data, qids)
         except urllib.error.HTTPError as exc:
-            last = f"HTTP {exc.code}"
+            detail = ""
+            try:
+                detail = exc.read(200).decode("utf-8", "replace").replace("\n", " ")
+            except (OSError, AttributeError, UnicodeError, KeyError):
+                detail = ""
+            last = f"HTTP {exc.code}" + (f" {detail}" if detail else "")
             if exc.code < 500 and exc.code != 429:
                 raise JevError(last) from None
         except JevError:
@@ -742,14 +787,18 @@ def _cache_store(path, key, value):
 # Evaluation
 # ---------------------------------------------------------------------------
 
-def evaluate(diff_text, *, task, rules, profile, key, deadline, cache_file=None, repository=""):
-    """Run the regex scan and the Jev questions. Returns a result dict (no diff or task text)."""
+def evaluate(diff_text, *, task, rules, profile, key, deadline, cache_file=None, repository="", data_paths=()):
+    """Run the regex scan and the Jev questions. Returns a result dict (no diff or task text).
+
+    A file under a data path (data_paths_for) is secret-scanned like every file but is not sent to Jev."""
     files = split_diff(diff_text)
-    shown = [f for f in files if not f.binary and not f.excluded]
+    for f in files:
+        f.data = (not f.binary) and any(fnmatch.fnmatchcase(f.path, pat) for pat in data_paths)
+    shown = [f for f in files if not f.binary and not f.excluded and not f.data]
     hits = scan_secrets(files)
     result = {"profile": profile, "model": "", "checks": [], "regex_hits": hits,
               "jev_status": "ok", "error": "", "calls": 0, "chunks": 0, "unchecked_chunks": 0,
-              "input_tokens": 0, "output_tokens": 0, "files": len(files),
+              "input_tokens": 0, "output_tokens": 0, "files": len(files), "data_files": sum(f.data for f in files),
               "diff_bytes": len(diff_text.encode("utf-8"))}
     classes = [(q, c) for q, c in PROFILES[profile]
                if not (q == TASK_QUESTION and not task) and not (q == "breaks_rule" and not rules)]
@@ -768,13 +817,25 @@ def evaluate(diff_text, *, task, rules, profile, key, deadline, cache_file=None,
         base_state["rules"] = rules
     if task:
         base_state["task"] = task
-    overhead = len(json.dumps(base_state, ensure_ascii=False).encode("utf-8"))
+    # The task is sent only with the first part. Do not let a long PR body shrink every part.
+    sizing = {k: v for k, v in base_state.items() if k != "task"}
+    overhead = len(json.dumps(sizing, ensure_ascii=False).encode("utf-8"))
     limit = max(MIN_CHUNK_BYTES, STATE_BYTES - overhead)
-    result["truncated_files"] = sum(len(f.text.encode("utf-8")) > limit for f in shown)
-    chunks = make_chunks([redact(f.text) for f in shown], limit)
-    result["unchecked_chunks"] = max(0, len(chunks) - MAX_CHUNKS)
-    chunks = chunks[:MAX_CHUNKS]
+    texts = [redact(f.text) for f in shown]
+    all_chunks = make_chunks(texts, limit)
+    result["unchecked_chunks"] = max(0, len(all_chunks) - MAX_CHUNKS)
+    chunks = all_chunks[:MAX_CHUNKS]
     result["chunks"] = len(chunks)
+    # A file is partly reviewed only when some of its diff sits in a dropped chunk.
+    covered = len("".join(chunks).encode("utf-8"))
+    used, partial = 0, 0
+    if result["unchecked_chunks"]:
+        for text in texts:
+            n = len(text.encode("utf-8"))
+            if used + n > covered:
+                partial += 1
+            used += n
+    result["truncated_files"] = partial
 
     diff_qids = [q for q, _ in classes if q != TASK_QUESTION]
     requests = []
@@ -889,6 +950,44 @@ def read_rules(repo, base=None):
         if text and text.strip():
             return text[:RULES_CHARS]
     return ""
+
+
+DATA_PATH_RE = re.compile(r"^\.?[A-Za-z0-9_][A-Za-z0-9_.-]*(?:/[A-Za-z0-9_.*-]+)*/[A-Za-z0-9_.*-]*\.(?:json|jsonl|csv)$")
+NEVER_DATA_BRANCHES = ("main", "master")
+
+
+def data_paths_for(repo, base, mode, stdin_text=""):
+    """Paths whose changes are data exports, not code (backup exports such as saas/*.json).
+
+    Narrow on purpose: the patterns come from `data_paths` in .jev/config.json as it is on the BASE
+    (the default branch), so a change cannot grant itself the exemption; each pattern must sit under a
+    literal directory and end in .json, .jsonl or .csv; never in ci mode; never when a push or the
+    current branch is the default branch. Files matched are still secret-scanned, only the model skips them."""
+    if mode == "ci" or not base:
+        return ()
+    raw = git_try(repo, "show", f"{base}:.jev/config.json")
+    try:
+        listed = json.loads(raw).get("data_paths", []) if raw else []
+    except (ValueError, AttributeError):
+        return ()
+    patterns = tuple(p for p in listed if isinstance(p, str) and DATA_PATH_RE.match(p) and ".." not in p) \
+        if isinstance(listed, list) else ()
+    if not patterns:
+        return ()
+    default = default_remote_ref(repo)
+    protected = set(NEVER_DATA_BRANCHES) | ({default.split("/", 1)[-1]} if default else set())
+    if mode == "pre-push":
+        refs = [line.split() for line in stdin_text.splitlines() if line.strip()]
+        branches = [r[2][len("refs/heads/"):] for r in refs if len(r) == 4 and r[2].startswith("refs/heads/")
+                    and set(r[1]) != {"0"}]
+        if not branches or len(branches) != len([r for r in refs if len(r) == 4 and set(r[1]) != {"0"}]):
+            return ()
+    else:
+        head = (git_try(repo, "symbolic-ref", "-q", "--short", "HEAD") or "").strip()
+        branches = [head] if head else []
+        if not branches:
+            return ()
+    return patterns if not any(b in protected for b in branches) else ()
 
 
 def default_profile(repo):
@@ -1155,6 +1254,7 @@ def run(args):
     name = repo_name(repo)
     rec = evaluate(diff, task=task_text(args.task, log), rules=read_rules(repo, base),
                    profile=profile, key=key, deadline=deadline, repository=name,
+                   data_paths=data_paths_for(repo, base, mode, stdin_text),
                    cache_file=cache_path(repo) if mode != "ci" and not (network_secret or args.no_cache or args.require_model or args.require_review) else None)
     override = find_override(log)
     rec.update(credential_source=credential_source, repo=name, head=(git_try(repo, "rev-parse", "HEAD") or "").strip(), mode=mode,
