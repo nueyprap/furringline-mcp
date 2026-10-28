@@ -60,7 +60,7 @@ jobs:
   # Main's second reviewer. It checks out main and reads the PR as git data, never running it.
   main-review:
     needs: scope
-    if: ${{ needs.scope.outputs.gates_changed == 'true' }}
+    if: ${{ needs.scope.outputs.gates_changed == 'true' && github.event.pull_request.head.repo.full_name == github.repository }}
     permissions:
       contents: read
       pull-requests: write
