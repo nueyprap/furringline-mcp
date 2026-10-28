@@ -434,6 +434,7 @@ jobs:
           ANTHROPIC_API_KEY_CONSOLE_WORK: ${{ secrets.ANTHROPIC_API_KEY_CONSOLE_WORK }}
           ANTHROPIC_API_KEY_CONSOLE: ${{ secrets.ANTHROPIC_API_KEY_CONSOLE }}
           CLAUDE_KEY_CHAIN: ${{ vars.CLAUDE_KEY_CHAIN }}
+          CLAUDE_USAGE_KEY: ${{ secrets.CLAUDE_USAGE_KEY }}
           KEY_ROOM_CAP: ${{ vars.KEY_ROOM_CAP }}
           CODE: ${{ steps.scope.outputs.code }}
         shell: bash
@@ -477,6 +478,11 @@ jobs:
           then pass ENV_VAR as an env line. KEY_ROOM_CAP (default 0.97) is the meter share at which a
           `room` key is skipped.
 
+          Cost log (Narathip, 2026-10-27: "make the GitHub review and fix bots log their cost and which account they
+          used"): after every Claude Code run in GitHub Actions, one line goes to the run log, the step summary and the
+          Supabase table memory.claude_usage (function claude-usage, write key CLAUDE_USAGE_KEY; skipped when unset):
+          repo, workflow, run, account, model, tokens, the CLI's cost and the cost repriced at PRICES. Never a key.
+
           review.yml carries a copy of this file (embed.py keeps it in step); tests guard the copy.
           Python 3.9+, standard library only. Never prints a key.
           """
@@ -485,9 +491,11 @@ jobs:
           import json
           import os
           import re
+          import secrets
           import shlex
           import subprocess
           import sys
+          import time
           import urllib.error
           import urllib.request
 
@@ -509,6 +517,15 @@ jobs:
                                  r"|token (has )?expired|/login|not logged in|forbidden|billing", re.I)
           METER_URL = "https://api.anthropic.com/v1/messages"
           H = "anthropic-ratelimit-unified-"
+          USAGE_URL = "https://ptpeikfudimviopqjpgc.supabase.co/functions/v1/claude-usage"
+          USAGE_KEY = "CLAUDE_USAGE_KEY"
+          # Dollars per million tokens: input, output, cache read, cache write (Narathip's list, 2026-10-27). Matched by
+          # family name, so an older model of a family is repriced at today's price.
+          PRICES = {"opus": (4, 20, 0.20, 5), "fable": (10, 50, 0.25, 12.5), "sonnet": (2, 10, 0.20, 2.5),
+                    "haiku": (0.10, 0.50, 0.01, 0.125)}
+          TOKEN_FIELDS = ("inputTokens", "outputTokens", "cacheReadInputTokens", "cacheCreationInputTokens")
+          ACCOUNTS = {"team": "team", "team-extra": "team", "work": "work", "personal": "personal",
+                      "personal-extra": "personal", "console-work": "console", "console": "console"}
 
 
           def chain(environ=None) -> list:
@@ -593,7 +610,7 @@ jobs:
 
 
           def run_claude(cmd: list, environ: dict, entry: dict, token: str, cwd=None, timeout=45 * 60) -> dict:
-              env = {k: v for k, v in environ.items() if k not in KEY_VARS and k != entry["env"]}
+              env = {k: v for k, v in environ.items() if k not in KEY_VARS and k not in (entry["env"], USAGE_KEY)}
               env["ANTHROPIC_API_KEY" if entry["kind"] == "api" else "CLAUDE_CODE_OAUTH_TOKEN"] = token
               try:
                   p = subprocess.run(cmd, cwd=cwd, env=env, capture_output=True, text=True, timeout=timeout)
@@ -611,8 +628,104 @@ jobs:
               return res
 
 
-          def run(cmd: list, environ=None, runner=None, meter=None, say=print, cwd=None) -> dict:
-              """Try each key in order; the last result, with `key` (the one that ran) and `tried` (one line per key)."""
+          def priced(model_usage: dict):
+              """The call's cost at PRICES from the CLI's per-model token counts; None when a model has no price."""
+              total = 0.0
+              for model, u in (model_usage or {}).items():
+                  price = next((p for fam, p in PRICES.items() if fam in model.lower()), None)
+                  if price is None:
+                      return None
+                  n = [u.get(k) or 0 for k in TOKEN_FIELDS]
+                  total += sum(a * b for a, b in zip(n, price)) / 1e6
+              return round(total, 6) if model_usage else None
+
+
+          def usage_row(res: dict, entry: dict, n: int, tried: list, environ=None) -> dict:
+              """One memory.claude_usage row for a finished Claude call: names and numbers only, never a key or output."""
+              environ = os.environ if environ is None else environ
+              g = environ.get
+              mu = res.get("modelUsage") if isinstance(res.get("modelUsage"), dict) else {}
+              mu = {m: x for m, x in mu.items() if isinstance(x, dict) and any(x.get(k) for k in TOKEN_FIELDS)}
+              u = res.get("usage") if isinstance(res.get("usage"), dict) else {}
+              tok = {}
+              for name, per_model, total in (("input_tokens", "inputTokens", "input_tokens"),
+                                             ("output_tokens", "outputTokens", "output_tokens"),
+                                             ("cache_read_tokens", "cacheReadInputTokens", "cache_read_input_tokens"),
+                                             ("cache_write_tokens", "cacheCreationInputTokens", "cache_creation_input_tokens")):
+                  tok[name] = int(sum(m.get(per_model) or 0 for m in mu.values()) if mu else u.get(total) or 0)
+              pr = re.match(r"refs/pull/(\d+)/", g("GITHUB_REF") or "")
+              if not pr and g("GITHUB_EVENT_PATH"):  # pull_request_target, workflow_call: the PR is in the event
+                  try:
+                      with open(g("GITHUB_EVENT_PATH")) as f:
+                          pr = re.match(r"(\d+)$", str((json.load(f).get("pull_request") or {}).get("number") or ""))
+                  except (OSError, ValueError, AttributeError):
+                      pr = None
+              repo, run_id, attempt = g("GITHUB_REPOSITORY") or "local", g("GITHUB_RUN_ID") or "", g("GITHUB_RUN_ATTEMPT") or ""
+              job, step = g("GITHUB_JOB") or "", g("GITHUB_ACTION") or ""
+              main = max(mu, key=lambda m: mu[m].get("costUSD") or 0) if mu else None
+              cost = res.get("total_cost_usd")
+              return {
+                  "call_id": f"{repo}/{run_id}/{attempt}/{job}/{step}/{n}-{secrets.token_hex(3)}"[:300],
+                  "ran_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), "source": "ci", "repo": repo[:200],
+                  "workflow": (g("GITHUB_WORKFLOW") or "")[:200], "job": job[:200], "step": step[:200],
+                  "event": (g("GITHUB_EVENT_NAME") or "")[:200], "run_id": int(run_id) if run_id.isdigit() else None,
+                  "run_attempt": int(attempt) if attempt.isdigit() else None, "pr": int(pr.group(1)) if pr else None,
+                  "key": entry["name"][:40], "account": ACCOUNTS.get(entry["name"], "none"), "model": main,
+                  "model_usage": {m: {k: v for k, v in x.items() if isinstance(v, (int, float))} for m, x in mu.items()},
+                  **tok, "cost_reported_usd": round(cost, 6) if isinstance(cost, (int, float)) else None,
+                  "cost_priced_usd": priced(mu), "turns": res.get("num_turns"), "duration_ms": res.get("duration_ms"),
+                  "is_error": bool(res.get("is_error")), "subtype": str(res.get("subtype") or "")[:40] or None,
+                  "tried": [t.split(":")[0][:40] for t in tried][:9] + [entry["name"][:40]],
+              }
+
+
+          def report(row: dict, environ=None, opener=urllib.request.urlopen, say=print, wait=2) -> str:
+              """Log one usage row: the run log, the step summary, then the shared table. Returns 'sent', 'no key' or
+              why it was not stored. Never fails the run."""
+              environ = os.environ if environ is None else environ
+              say("claude-usage " + json.dumps(row, separators=(",", ":")))
+              if environ.get("GITHUB_STEP_SUMMARY"):
+                  ict = time.strftime("%Y-%m-%d %H:%M", time.gmtime(time.time() + 7 * 3600))
+                  cost = row["cost_reported_usd"]
+                  tokens_in = row["input_tokens"] + row["cache_read_tokens"] + row["cache_write_tokens"]
+                  try:
+                      with open(environ["GITHUB_STEP_SUMMARY"], "a") as f:
+                          f.write(f"\nClaude usage: {row['account']} account (key {row['key']}), {row['model']}, "
+                                  f"{tokens_in:,} in / {row['output_tokens']:,} out tokens, "
+                                  f"${cost if cost is not None else '?'} at API prices (repriced ${row['cost_priced_usd']}), "
+                                  f"{row['ran_at']} ({ict} ICT)\n")
+                  except OSError:
+                      pass
+              key = environ.get(USAGE_KEY) or ""
+              if not key:
+                  return "no key"
+              body = json.dumps({"action": "add", "rows": [row]}).encode()
+              why = ""
+              for pause in (0, wait):
+                  time.sleep(pause)
+                  req = urllib.request.Request(USAGE_URL, data=body, method="POST",
+                                               headers={"Authorization": "Bearer " + key, "Content-Type": "application/json",
+                                                        "User-Agent": "key-chain/1"})
+                  try:
+                      with opener(req, timeout=10) as r:
+                          r.read()
+                      return "sent"
+                  except urllib.error.HTTPError as e:
+                      why = f"HTTP {e.code}"
+                      if e.code < 500:
+                          break
+                  except Exception as e:  # network, timeout
+                      why = type(e).__name__
+              say(f"::warning::claude-usage: the usage row was not stored ({why}); the line above has it")
+              return why
+
+
+          def run(cmd: list, environ=None, runner=None, meter=None, say=print, cwd=None, log=None) -> dict:
+              """Try each key in order; the last result, with `key` (the one that ran) and `tried` (one line per key).
+              Each Claude call is passed to log(row); with the real runner the default is report()."""
+              if log is None and runner is None:
+                  def log(row):
+                      report(row, environ, say=say)
               runner, meter = runner or run_claude, meter or read_meter
               environ = dict(os.environ if environ is None else environ)
               cap = float(environ.get("KEY_ROOM_CAP") or 0.97)
@@ -632,6 +745,11 @@ jobs:
                           continue
                   res = runner(cmd, environ, e, token, cwd=cwd)
                   res["key"] = e["name"]
+                  if log:
+                      try:
+                          log(usage_row(res, e, i, tried, environ))
+                      except Exception as ex:  # the log never stops a review or a fix
+                          say(f"::warning::claude-usage: could not log this call ({type(ex).__name__})")
                   more = any(environ.get(x["env"]) for x in entries[i + 1:])
                   if more and should_fall_back(res):
                       tried.append(f"{e['name']}: {str(res.get('result'))[:120]}")
@@ -699,6 +817,7 @@ jobs:
           ANTHROPIC_API_KEY_CONSOLE_WORK: ${{ secrets.ANTHROPIC_API_KEY_CONSOLE_WORK }}
           ANTHROPIC_API_KEY_CONSOLE: ${{ secrets.ANTHROPIC_API_KEY_CONSOLE }}
           CLAUDE_KEY_CHAIN: ${{ vars.CLAUDE_KEY_CHAIN }}
+          CLAUDE_USAGE_KEY: ${{ secrets.CLAUDE_USAGE_KEY }}
           KEY_ROOM_CAP: ${{ vars.KEY_ROOM_CAP }}
         shell: bash
         run: |
