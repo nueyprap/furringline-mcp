@@ -38,6 +38,7 @@ from pathlib import Path
 ALERT_URL = "https://email-screening.narathip.workers.dev/alert"
 LOG_BRANCH = "night-shift-log"
 REPO = os.environ.get("GITHUB_REPOSITORY", "")
+NAME = REPO.rsplit("/", 1)[-1]  # repo name for the iMessage, without the owner
 
 
 def run(*cmd, check=True, cwd=None) -> str:
@@ -51,13 +52,16 @@ def git(*args, check=True) -> str:
     return run("git", *args, check=check)
 
 
-def alert(title: str, message: str):
+def alert(type_: str, what: str, means: str = "", do: str = "", link: str = ""):
+    """One iMessage in the standard shape (imessage-writing skill, Narathip 2026-10-18):
+    type broken|fixed|needs-you, the point first, what it means, one action, a link."""
     key = os.environ.get("ALERT_KEY")
-    print(f"ALERT: {title}: {message}")
+    print(f"ALERT: {type_}: {what} | {means} | {do} | {link}")
     if not key:
         print("::warning::ALERT_KEY secret not set; alert only in the log")
         return
-    body = json.dumps({"title": title[:200], "message": message[:4000], "source": "night-shift"}).encode()
+    body = json.dumps({"type": type_, "what": what, "means": means or None, "do": do or None,
+                       "link": link or None, "agent": "claude", "source": "night-shift"}).encode()
     req = urllib.request.Request(ALERT_URL, data=body, method="POST",
                                  headers={"Content-Type": "application/json", "X-Alert-Key": key,
                                           "User-Agent": "night-shift/1.0"})  # Cloudflare blocks Python-urllib
@@ -94,6 +98,41 @@ def dispatch_and_wait(workflow: str, ref: str, inputs: dict | None = None, timeo
         if r["status"] == "completed":
             return r["conclusion"] == "success", url
     return False, f"{url} (timed out)"
+
+
+# Checks from main (2026-10-28): run on pull_request_target, so a workflow-token PR's held run of them has
+# that event, not pull_request. Required checks named here are waited for before the merge.
+FROM_MAIN_CHECKS = ("checks-from-main", "gates-from-main")
+
+
+def approve_held(branch: str):
+    """Approve every run on the branch that waits for approval, from either PR event."""
+    for event in ("pull_request", "pull_request_target"):
+        rows = json.loads(run("gh", "run", "list", "--repo", REPO, "--branch", branch, "--event", event,
+                              "--limit", "20", "--json", "databaseId,status,conclusion", check=False) or "[]")
+        for r in rows:
+            if "action_required" in (r.get("status"), r.get("conclusion")):
+                run("gh", "api", "-X", "POST", f"repos/{REPO}/actions/runs/{r['databaseId']}/approve", check=False)
+
+
+def wait_from_main(pr: str, branch: str, timeout=1800) -> tuple[bool, str]:
+    """Wait for the PR's checks-from-main / gates-from-main (approving held runs). (True, "") when it
+    passed or skipped, or never appeared in 3 minutes (the repo does not have it; the merge then says)."""
+    start = time.time()
+    while time.time() - start < timeout:
+        approve_held(branch)
+        rows = json.loads(run("gh", "pr", "checks", pr, "--repo", REPO, "--json", "name,state,link",
+                              check=False) or "[]")
+        mine = [r for r in rows if r.get("name") in FROM_MAIN_CHECKS]
+        if not mine and time.time() - start > 180:
+            print("no checks-from-main / gates-from-main on this PR after 3 minutes; merging as before "
+                  "(if the repo requires one, GitHub refuses the merge and says which)")
+            return True, ""
+        if mine and all(r.get("state") not in ("PENDING", "QUEUED", "IN_PROGRESS", "EXPECTED") for r in mine):
+            bad = [r for r in mine if r.get("state") not in ("SUCCESS", "SKIPPED", "NEUTRAL")]
+            return (not bad), (bad[0].get("link", "") if bad else "")
+        time.sleep(15)
+    return False, f"{pr}: checks from main did not finish (timed out)"
 
 
 def pr_checks_and_wait(workflow: str, branch: str, timeout=1800) -> tuple[bool, str]:
@@ -185,8 +224,9 @@ def main(argv=None) -> int:
     if a.mode == "reject":
         entry["outcome"] = "rejected"
         if any(r.startswith("gate error") for r in entry["reasons"]):
-            alert("Night Shift gate error", f"{REPO} {a.branch}: {entry['reasons'][0]}. The branch was not merged. "
-                                            f"Nothing for you to do unless this repeats. {entry['run']}")
+            print(f"gate error: {entry['reasons'][0]}")
+            alert("broken", f"Nightly check could not run in {NAME}", "That night's change was not merged.",
+                  "Nothing to do.", entry["run"])
         append_log(entry)
         delete_branch(a.branch)
         return 0
@@ -238,6 +278,14 @@ def main(argv=None) -> int:
                     append_log(entry)
                     delete_branch(a.branch)
                     return 0
+            ok, url = wait_from_main(pr, a.branch)
+            if not ok:
+                run("gh", "pr", "close", pr, "--repo", REPO, "--comment", f"Night Shift: checks from main failed: {url}",
+                    check=False)
+                entry.update(outcome="rejected", reasons=[f"checks from main failed: {url}"])
+                append_log(entry)
+                delete_branch(a.branch)
+                return 0
             run("gh", "pr", "merge", pr, "--repo", REPO, "--merge", "--subject", title, "--body", body)
             git("fetch", "-q", "origin", base_branch)
             merge_sha = git("rev-parse", f"origin/{base_branch}")
@@ -268,10 +316,12 @@ def main(argv=None) -> int:
                 git("push", "-q", "origin", f"HEAD:{base_branch}")
                 ok2, url2 = dispatch_and_wait(deploy["workflow"], base_branch, deploy["live_inputs"])
                 entry.update(outcome="reverted", revert=git("rev-parse", "HEAD"), redeploy=url2)
-                alert("Night Shift reverted a live change",
-                      f"{REPO}: the live deploy of {a.branch} failed its checks ({url}). Night Shift reverted the merge "
-                      f"and redeployed: {'OK' if ok2 else 'REDEPLOY ALSO FAILED ' + url2}. "
-                      + ("Nothing for you to do." if ok2 else "Check the site now; deploy.mjs rolls back on failed checks."))
+                if ok2:
+                    alert("broken", f"A nightly change broke {NAME} and was undone",
+                          "The live version is back to before.", "Nothing to do.", url)
+                else:
+                    alert("needs-you", f"A nightly change broke {NAME} and the undo failed",
+                          "The live site may show errors now.", "Check the live site now.", url2)
         for wf in cfg.get("dispatch_after_merge", []):
             ok, url = dispatch_and_wait(wf, base_branch)
             entry.setdefault("after_merge", []).append({"workflow": wf, "ok": ok, "url": url})
@@ -281,15 +331,16 @@ def main(argv=None) -> int:
                 git("revert", "--no-edit", "-m", "1", merge_sha)
                 git("push", "-q", "origin", f"HEAD:{base_branch}")
                 entry.update(outcome="reverted", revert=git("rev-parse", "HEAD"))
-                alert("Night Shift reverted a change", f"{REPO}: {wf} failed after merging {a.branch} ({url}). "
-                                                       "Night Shift reverted it. Nothing for you to do.")
+                alert("broken", f"A nightly change in {NAME} failed a check and was undone",
+                      "The main branch is back to before.", "Nothing to do.", url)
         append_log(entry)
         delete_branch(a.branch)
         return 0
     except Exception as e:
         entry.update(outcome="error", reasons=[str(e)[:500]])
-        alert("Night Shift merge step broke", f"{REPO} {a.branch}: {str(e)[:300]}. Check {entry['run']}. "
-                                              "Main was not changed unless the log says merged.")
+        print(f"merge step error: {str(e)[:500]}")
+        alert("broken", f"Nightly Repo Improvements could not merge in {NAME}",
+              "The change waits on its branch; nothing else changed.", "Ask Claude to look at the run.", entry["run"])
         append_log(entry)
         return 1
 
