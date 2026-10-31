@@ -127,33 +127,38 @@ jobs:
         APPROVAL_RULES.md and the like), a skill definition (SKILL.md), or hook or check code that can stop an agent. Several
         agents (Claude Code, Codex, Cursor, Grok Bots, Hermes) follow these rules literally, many sessions at once, on two
         Macs and in the cloud, and nobody reads the rule again before it reaches all of them. A hook runs on every turn of
-        every session. A scope mistake that looks small here repeats thousands of times. You are the second look: look for flaws,
-        recheck the logic and reasoning, and find the outcomes nobody planned for.
+        every session, so a scope mistake that looks small here repeats thousands of times.
+        You are the second look: look for flaws, recheck the logic and reasoning, and find the outcomes nobody planned for.
+        A separate code review reads the same change for ordinary bugs. Your job is what agents will do because of the rule.
 
         Read first, in the review packet folder .rule-review:
         - pr.md: what the change says it does.
         - rules.md: the rule files in this change and why each counts as a rule.
         - rules.patch: the diff of those files with wide context. Read all of it, in parts if it is long.
         - files.txt and diff.patch: every changed file and the full diff (other code the rule uses).
-        Then read in the repository (this checkout is the change's head): the whole new text of each changed rule file, AGENTS.md, every skill or doc the change
-        names, and, for hook or check code, the function that decides to block, what it reads (state files, folders, other
-        agents' data), and how it is installed (which event, which agents, which machines). `git log` and `git show` are
-        allowed. Do not change any file and do not run anything else.
+        - previous.md and newest.patch, only when they exist: an earlier round of this review, the points it raised, and the
+          commits pushed since then. See "Earlier rounds" below.
+        Then read in the repository (this checkout is the change's head): the whole new text of each changed rule file,
+        AGENTS.md, every skill or doc the change names, and, for hook or check code, the function that decides to block, what
+        it reads (state files, folders, other agents' data), and how it is installed (which event, which agents, which
+        machines). `git log` and `git show` are allowed; use `git show <base>:<file>` to see what was there before. Do not
+        change any file and do not run anything else.
 
-        For each new or changed rule or hook, answer:
+        Use these questions to find problems. Then judge each one against the bar below.
         1. Scope. Who does it block, nag or change: one task, one session, every session of one agent type, every agent?
-           Is that the right scope? Picture a fresh session of the same agent that has nothing to do with the trigger, and
-           a session of another agent. A block that hits sessions which did not cause the problem and cannot fix it is a
-           problem.
-        2. Incentives. What is the cheapest thing an agent could do just to make the block or the nag go away? Deleting or
-           "cleaning up" files a live task still uses, touching other agents' files, skipping a step, writing fake
-           evidence, or quietly turning the check off. Text that lists other agents' folders, files or tasks next to an
-           instruction to free space or clean up invites exactly that. An escape hatch that accepts any free-text reason
-           lets an agent certify itself instead of doing the work.
+           Picture a fresh session of the same agent that has nothing to do with the trigger, and a session of another
+           agent. A block that hits sessions which did not cause the problem and cannot fix it is a problem.
+        2. Shortcuts. Agents are honest but hasty: they want to finish, and they take the shortest path the text or the
+           block leaves open without checking what else it touches. What will a hasty agent do to make the block or the nag
+           go away? Deleting or "cleaning up" files a live task still uses, touching other agents' files, skipping a step, or
+           turning the check off. Text that lists other agents' folders, files or tasks next to an instruction to free space
+           or clean up invites exactly that. An escape hatch that takes any free-text reason becomes the usual path instead
+           of the work. Do not build a problem on an agent that sets out to cheat: forging evidence, digging out another
+           session's ids or keys, or studying the code to defeat a check on purpose.
         3. Edge cases. Walk these concretely: work that runs for days; work waiting on Narathip; large legitimate work
            (evals, test copies, long builds); another agent's files and tasks; a cloud session versus a Mac; both Macs off;
-           a missing, stale or broken state file; a low limit (disk, plan usage, budget). Does legitimate work get blocked
-           with no way out, or is there an escape hatch an agent can use honestly?
+           a missing, stale or broken state file; a low limit (disk, plan usage, budget). Is legitimate work blocked with no
+           way out, or is there a way out an agent can use honestly?
         4. Clash. Does it contradict an existing rule in AGENTS.md, CLAUDE.md, APPROVAL_RULES.md or a skill (quote both), or
            create a second, different version of a rule that already exists? A short pointer in AGENTS.md to a canonical
            doc is this repository's normal pattern, not a duplicate.
@@ -170,15 +175,54 @@ jobs:
            because of it), interactions with other rules, hooks, agents and accounts (work, personal, cloud), what it does
            at scale, and what it does when a step it relies on fails halfway?
 
-        Verdict "fail" only for a real problem from these questions (a flaw in the logic is one): a concrete scenario where an agent following or
-        fighting this rule does the wrong thing, is blocked when it should not be, or puts data or another agent's work at
-        risk. Each problem names the file and its line number in the file as it is now (not in the patch), the scenario (who, doing what, gets which result), and a concrete fix
-        the author can make. Several flaws in one change are several problems; list each one separately.
+        The bar. A problem fails the review only when all three are true:
+        a. This change brings it in or makes it worse. A problem that is already on the base and that the change leaves as
+           it was is a note, even when it is real.
+        b. It is likely: it happens in normal use (an ordinary session, a normal multi-day task, an everyday edit, a usual
+           failure such as a Mac off or a plan limit), not only after a rare chain of events or when an agent sets out to
+           cheat.
+        c. It does real harm: legitimate work is blocked with no way out; data, or another agent's work, is lost or put at
+           risk; a secret leaks; a check before main (tests, the second reviewer, outside-data checks, checks-before-main)
+           can be skipped or weakened, or a new check can be passed by typing a claim; agents get two rules that say
+           different things (another rule, or an unchanged line of the same file), so following one breaks the other;
+           Narathip gets many alerts for one problem, or none for a real breakage; or it adds an unstated cost on every
+           turn, PR or day.
+        A rare case with an honest way out is a note: Narathip can answer it, an off switch or override exists, a budget can
+        be raised once, or the check fails open with an alert. Name the way out in the note. Before you call anything a way
+        out, ask how often normal work meets it. A way out never saves a common case. Two cases in this repository are
+        always common, so they fail even when a way out exists:
+        - A new gate or check that does not see an ordinary honest way to satisfy it (work done by a subagent or another
+          session, a delegated draft, the cloud), so honest work is blocked each time that way is used. Or a gate that a
+          hasty agent can skip with a skip tag, a free-text reason or its own verdict that nobody checks or sees, so the
+          gate quietly stops doing its job. "Run the step again in the main session" or "add the skip tag" is not a way out.
+        - Large or long legitimate work (evals, big test copies, long builds, work that runs for days or waits on
+          Narathip) that is blocked, nagged or told to finish or clean up, when the only way past is to raise a limit or
+          explain itself each time, or to wait. That is real harm to legitimate work, not a note.
+        Three harms fail even when rare, when this change brings them in: a secret in the repository or a log; deleting data
+        that cannot be got back; a way for a pull request to skip or weaken a check before main.
 
-        Never fail on style, wording, length, structure, missing examples, or "could be clearer". Those go in notes.
-        Clarifications, log entries, recorded IDs, paths and dates, pointers to a canonical doc, and docs that only describe
-        what already exists are normal edits: pass them. When unsure whether a problem is real, read more before deciding;
-        if it is still only a guess, put it in notes, not in problems.
+        Ordinary bugs belong to the code review. A wrong condition, a missing field, a retry or a race inside a tool or
+        script is a note here, unless it changes who a rule or hook blocks, nags or tells to act, or it breaks one of the
+        protections in c. Hook and check code that decides to block is rule code: its bugs are yours.
+
+        Earlier rounds. When previous.md exists, the author has pushed again after an earlier round. Do not start a fresh hunt.
+        - Take each earlier point in turn. If the newest commits fix it, or it does not meet the bar, drop it. Re-raise it
+          only when the fix fails or was not made, and say in `what` why the fix does not work.
+        - A new point must come from the newest commits: something they add or make worse (newest.patch). A problem in
+          code an earlier round already read and did not raise is a note, unless it is one of the three harms that fail
+          even when rare.
+        - An earlier verdict is not a reason by itself: pass or fail on what the change does now.
+
+        Verdict "fail" only when at least one problem meets the bar. Each problem names the file and its line number in the
+        file as it is now (not in the patch), the scenario (who, doing what, gets which result), a concrete fix the author can
+        make, `bar` (why it meets each part of the bar) and `earlier` ("re-raised" for a point from previous.md, else "new").
+        Several flaws in one change are several problems; list each one separately. Everything else goes in notes, at most
+        five, most useful first.
+
+        Never fail on style, wording, length, structure, missing examples, or "could be clearer". Clarifications, log
+        entries, recorded IDs, paths and dates, pointers to a canonical doc, and docs that only describe what already exists
+        are normal edits: pass them. When unsure whether a problem is real or likely, read more before deciding; if it is
+        still only a guess, put it in notes, not in problems.
 
         Write plain, short English. Your final answer is the structured output only.
       RULE_ARGS: |
@@ -186,7 +230,7 @@ jobs:
         --max-turns 60
         --allowedTools "Read,Grep,Glob,Bash(git diff:*),Bash(git log:*),Bash(git show:*)"
         --disallowedTools "Edit,Write,NotebookEdit,WebFetch,WebSearch"
-        --json-schema '{"type":"object","additionalProperties":false,"required":["verdict","summary","problems","notes"],"properties":{"verdict":{"type":"string","enum":["pass","fail"]},"summary":{"type":"string","description":"One to three plain sentences: what the rule change does and your overall judgement."},"problems":{"type":"array","description":"Real problems only; empty when verdict is pass. One item per flaw.","items":{"type":"object","additionalProperties":false,"required":["kind","file","scenario","what","fix"],"properties":{"kind":{"type":"string","enum":["wrong-scope","perverse-incentive","blocks-legit-work","cross-agent-risk","clash","duplicate","cost","unenforceable","fails-closed","loop","other"]},"file":{"type":"string"},"line":{"type":"integer"},"scenario":{"type":"string","description":"Who, doing what, gets which result."},"what":{"type":"string"},"fix":{"type":"string"}}}},"notes":{"type":"array","description":"Optional non-blocking remarks, at most 5.","items":{"type":"string"}}}}'
+        --json-schema '{"type":"object","additionalProperties":false,"required":["verdict","summary","problems","notes"],"properties":{"verdict":{"type":"string","enum":["pass","fail"]},"summary":{"type":"string","description":"One to three plain sentences: what the rule change does and your overall judgement."},"problems":{"type":"array","description":"Only problems that meet the bar; empty when verdict is pass. One item per flaw.","items":{"type":"object","additionalProperties":false,"required":["kind","file","scenario","what","fix","bar","earlier"],"properties":{"kind":{"type":"string","enum":["wrong-scope","perverse-incentive","blocks-legit-work","cross-agent-risk","clash","duplicate","cost","unenforceable","fails-closed","loop","other"]},"file":{"type":"string"},"line":{"type":"integer"},"scenario":{"type":"string","description":"Who, doing what, gets which result."},"what":{"type":"string"},"fix":{"type":"string"},"bar":{"type":"string","description":"Why it meets the bar: what this change brings in or makes worse, why it is likely in normal use, and the harm."},"earlier":{"type":"string","enum":["new","re-raised"],"description":"re-raised: a point from previous.md whose fix fails or was not made; new: anything else."}}}},"notes":{"type":"array","description":"Optional non-blocking remarks, at most 5.","items":{"type":"string"}}}}'
     steps:
       # A normal run checks out the PR head. Under pull_request_target (called by gates-from-main) it checks
       # out the base branch (the default ref) without a stored token; the Scope step fetches the PR head as data.
@@ -261,6 +305,56 @@ jobs:
               is judged by both lists, so a PR cannot take its own files off the list."""
               return tuple(dict.fromkeys(ln.split("#", 1)[0].strip() for t in texts for ln in (t or "").splitlines()
                                          if ln.split("#", 1)[0].strip()))
+
+
+          # Earlier rounds (2026-10-31): each push got a fresh hunt, so a good PR failed three times on new points each
+          # round. The PR comment carries a hidden line with the last round's commit and rule-review problems
+          # (round_note below); the next round gets them in previous.md and the newest commits in newest.patch.
+          def read_round(text):
+              """The earlier round recorded in a PR comment body: {sha, verdict, problems}, or None."""
+              import base64 as _b64
+              import json as _json
+              m = _re.search(r"<!-- rule-review-round: ([A-Za-z0-9+/=]+) -->", text or "")
+              try:
+                  d = _json.loads(_b64.b64decode(m.group(1)).decode()) if m else None
+              except ValueError:
+                  return None
+              if not isinstance(d, dict) or not _re.fullmatch(r"[0-9a-f]{40}", str(d.get("sha"))) \
+                      or d.get("verdict") not in ("pass", "fail") or not isinstance(d.get("problems"), list):
+                  return None
+              return d
+
+
+          def round_files(rounds, head, base, git, limit=200000):
+              """{previous.md, newest.patch} for the review packet, or {} when no earlier round counts.
+              rounds: [(who, round)]; head and base are full commit ids; git(*args) returns git's output ('' on error).
+              A round counts only when its commit is an earlier commit of this head; only the newest such rounds are used."""
+              usable = []
+              for who, r in rounds:
+                  if r and r["sha"] != head and git("merge-base", r["sha"], head).strip() == r["sha"]:
+                      usable.append((int(git("rev-list", "--count", f"{r['sha']}..{head}").strip() or 0), who, r))
+              if not usable:
+                  return {}
+              near = min(n for n, _, _ in usable)
+              latest = [(who, r) for n, who, r in usable if n == near]
+              sha = latest[0][1]["sha"]
+              newest = ["--no-merges", head, f"^{sha}", f"^{base}"]
+              log = git("log", "--format=- %h %s", *newest).strip()
+              parts = ["# Earlier rounds of this rule review\n\n",
+                       f"This pull request was reviewed before, at commit {sha[:9]}. The commits pushed since then (merges "
+                       "from the base left out) are the newest commits:\n\n", (log or "- (none: only merges from the base)") + "\n\n",
+                       "newest.patch has their changes. `git diff " + sha[:9] + " HEAD` shows everything since that round, "
+                       "merges from the base included.\n"]
+              for who, r in latest:
+                  probs = r["problems"]
+                  parts.append(f"\n## {who}: {r['verdict'].upper()} at {sha[:9]}, {len(probs)} point(s)\n")
+                  for i, p in enumerate(probs, 1):
+                      where = str(p.get("file") or "") + (f":{p['line']}" if p.get("line") else "")
+                      parts.append(f"\n{i}. [{p.get('kind')}] `{where}`: {p.get('what')}\n   Fix asked: {p.get('fix')}\n")
+              patch = git("log", "-p", "--reverse", "--format=commit %H%n%s%n", *newest)
+              if len(patch) > limit:
+                  patch = patch[:limit] + "\n... cut: run `git log -p` on the commits above for the rest\n"
+              return {"previous.md": "".join(parts), "newest.patch": patch}
           # --- rule files: end ---
 
           out = {}
@@ -412,6 +506,26 @@ jobs:
                   f.write("# Rule files in this change\n\n" + "".join(f"- `{p}`: {w}\n" for p, w in rules))
               with open(".rule-review/rules.patch", "w") as f:
                   f.write(sh("git", "diff", "-U30", f"{mb}...{HEAD}", "--", *[p for p, _ in rules])[:400000])
+              # Earlier rounds (2026-10-31): the last round's points and the commits pushed since, from the hidden
+              # line each reviewer's PR comment keeps (round_note, Verdict step), so a new push is no fresh hunt.
+              rounds = []
+              if pr:
+                  import base64
+                  who = {"<!-- second-reviewer -->": "this pull request's reviewer",
+                         "<!-- second-reviewer:main -->": "main's reviewer (gate files changed)"}
+                  raw = sh("gh", "api", f"repos/{os.environ['REPO']}/issues/{pr}/comments", "--paginate", "--jq",
+                           '.[] | select(.user.login == "github-actions[bot]") | .body | @base64', check=False)
+                  for line in raw.split():
+                      text = base64.b64decode(line).decode("utf-8", "replace")
+                      rnd = read_round(text) if text.split("\n", 1)[0] in who else None
+                      if rnd:
+                          rounds.append((who[text.split("\n", 1)[0]], rnd))
+              earlier = round_files(rounds, sh("git", "rev-parse", HEAD).strip(), mb,
+                                    lambda *a: subprocess.run(["git", *a], capture_output=True, text=True).stdout)
+              for name, text in earlier.items():
+                  with open(f".rule-review/{name}", "w") as f:
+                      f.write(text)
+              out.update(earlier_round="true" if earlier else "false")
           out.update(pr=pr, base=mb)
           with open(os.environ["GITHUB_OUTPUT"], "a") as g:
               for k, v in out.items():
@@ -883,7 +997,7 @@ jobs:
         shell: bash
         run: |
           python3 - <<'PY'
-          import json, os, subprocess, sys
+          import base64, json, os, re, subprocess, sys
           env = os.environ
           MARK = env.get("MARK") or "<!-- second-reviewer -->"
           LABEL = env.get("LABEL") or "Second review"
@@ -939,6 +1053,15 @@ jobs:
               if u.get("turns") is not None:
                   m.append(f"{u['turns']} turns, {u.get('seconds')} s, {u.get('tokens_in')} in / {u.get('tokens_out')} out tokens")
               return m
+          # --- round note: start (copied verbatim into the Verdict step of scripts/second-reviewer/review.yml) ---
+          def round_note(sha, verdict, problems):
+              """The hidden line the PR comment keeps for the next round: this round's head and rule-review problems."""
+              import base64 as _b64
+              import json as _json
+              keep = [{k: p.get(k) for k in ("kind", "file", "line", "what", "fix")} for p in problems or []]
+              data = _json.dumps({"sha": sha, "verdict": verdict, "problems": keep}, separators=(",", ":"))
+              return "<!-- rule-review-round: " + _b64.b64encode(data.encode()).decode() + " -->"
+          # --- round note: end ---
           sha = (env.get("HEAD_SHA") or "")[:7]
           runs = []  # (kind, verdict, lines, usage, key, tried)
           if env.get("SKIP") == "true":
@@ -973,18 +1096,36 @@ jobs:
               meta += part
           meta += ["commit " + sha, "[log](" + env["RUN_URL"] + ")"]
           footer = "\n\n<sub>" + " · ".join(meta) + "</sub>"
-          body = f"{MARK}\n### {head}\n\n" + "\n".join(lines) + footer
+          pr = env.get("PR")
+          cid, old = [], ""
+          if pr and verdict != "skip":
+              rows = subprocess.run(["gh", "api", f"repos/{env['REPO']}/issues/{pr}/comments", "--paginate", "--jq",
+                                     f'.[] | select(.user.login == "github-actions[bot]" and (.body | startswith("{MARK}"))) | "\\(.id) \\(.body | @base64)"'],
+                                    capture_output=True, text=True).stdout.split("\n")
+              rows = [r.split() for r in rows if len(r.split()) == 2]
+              cid = [r[0] for r in rows]
+              old = base64.b64decode(rows[-1][1]).decode("utf-8", "replace") if rows else ""
+          # The next round reads this round's rule-review points from a hidden line (round_note); a run with no
+          # rule verdict keeps the line it found, so a "could not review" retry does not wipe the memory.
+          note = ""
+          try:
+              rule_out = json.loads(env.get("RULE_STRUCTURED") or "") if env.get("RULES") == "true" else None
+          except ValueError:
+              rule_out = None
+          full_sha = env.get("HEAD_SHA") or ""
+          if rule_out and rule_out.get("verdict") in ("pass", "fail") and re.fullmatch(r"[0-9a-f]{40}", full_sha):
+              note = round_note(full_sha, rule_out["verdict"], rule_out.get("problems"))
+          elif old:
+              found = re.search(r"<!-- rule-review-round: [A-Za-z0-9+/=]+ -->", old)
+              note = found.group(0) if found else ""
+          body = f"{MARK}\n### {head}\n\n" + "\n".join(lines) + footer + (f"\n{note}" if note else "")
           with open(env["GITHUB_STEP_SUMMARY"], "a") as f:
               f.write(body + "\n")
           for kind, v, _, u, key, _ in runs or [("code", verdict, None, {}, env.get("PLAN_TOKEN"), "")]:
               usage_line = json.dumps({"verdict": v, "kind": kind, "plan_token": key,
                                        **{k: u.get(k) for k in ("model", "turns", "tokens_in", "tokens_out", "api_equiv_usd")}})
               print("second-reviewer-usage " + usage_line)
-          pr = env.get("PR")
           if pr and verdict != "skip":
-              cid = subprocess.run(["gh", "api", f"repos/{env['REPO']}/issues/{pr}/comments", "--paginate", "--jq",
-                                    f'.[] | select(.user.login == "github-actions[bot]" and (.body | startswith("{MARK}"))) | .id'],
-                                   capture_output=True, text=True).stdout.split()
               args = (["-X", "PATCH", f"repos/{env['REPO']}/issues/comments/{cid[-1]}"] if cid
                       else ["-X", "POST", f"repos/{env['REPO']}/issues/{pr}/comments"])
               subprocess.run(["gh", "api", *args, "-f", f"body={body}"], capture_output=True, text=True)
