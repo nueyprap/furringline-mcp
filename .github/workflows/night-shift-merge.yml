@@ -98,9 +98,13 @@ jobs:
           name: night-shift-verdict
           path: verdict.json
           if-no-files-found: ignore
+  # Gets secrets, so only for a run started in this repository (night-shift-ci runs on push, which a fork
+  # cannot start here; the guard keeps it so if that ever changes). plan-login-check: untrusted-secrets.
   merge:
     needs: verify
-    if: needs.verify.outputs.verdict == 'pass' || needs.verify.outputs.verdict == 'fail'
+    if: >-
+      (github.event_name == 'workflow_dispatch' || github.event.workflow_run.head_repository.full_name == github.repository)
+      && (needs.verify.outputs.verdict == 'pass' || needs.verify.outputs.verdict == 'fail')
     runs-on: ubuntu-latest
     timeout-minutes: 75
     permissions:
