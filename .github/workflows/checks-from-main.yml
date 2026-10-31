@@ -57,10 +57,20 @@ jobs:
     with:
       pr_ref: ${{ github.event.pull_request.head.sha }}
 
+  # Only when main's ci failed on the PR head: is main's ci red on main itself?
+  base-ci:
+    needs: main-ci
+    if: ${{ always() && needs.main-ci.result == 'failure' }}
+    permissions:
+      contents: read
+    uses: ./.github/workflows/ci.yml
+    with:
+      pr_ref: ${{ github.event.pull_request.base.sha }}
+
   # Main's second reviewer. It checks out main and reads the PR as git data, never running it.
   main-review:
     needs: scope
-    if: ${{ needs.scope.outputs.gates_changed == 'true' && github.event.pull_request.head.repo.full_name == github.repository }}
+    if: ${{ needs.scope.outputs.gates_changed == 'true' }}
     permissions:
       contents: read
       pull-requests: write
@@ -68,7 +78,7 @@ jobs:
     secrets: inherit
 
   checks-from-main:
-    needs: [scope, main-ci, main-review]
+    needs: [scope, main-ci, base-ci, main-review]
     if: ${{ !cancelled() && !(needs.scope.result == 'success' && needs.scope.outputs.gates_changed == 'false') }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -79,6 +89,7 @@ jobs:
           SCOPE: ${{ needs.scope.result }}
           GATES_CHANGED: ${{ needs.scope.outputs.gates_changed }}
           CI: ${{ needs.main-ci.result }}
+          BASE_CI: ${{ needs.base-ci.result }}
           REVIEW: ${{ needs.main-review.result }}
           SAME_REPO: ${{ github.event.pull_request.head.repo.full_name == github.repository }}
         run: |
@@ -94,6 +105,8 @@ jobs:
             say "The PR comes from a fork and changes a gate file; main's ci never runs a fork's code."; fail=1
           elif [ "$CI" = success ]; then
             say "Main's ci on the PR head: pass."
+          elif [ "$CI" = failure ] && [ "$BASE_CI" = failure ]; then
+            say "Main's ci fails on main itself too, so it is broken, not weakened by this PR; main's review judges the change."
           else
             say "Main's ci on the PR head: '$CI'. The PR's own ci may pass only because the PR changed it."; fail=1
           fi
