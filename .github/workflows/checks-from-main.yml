@@ -57,7 +57,18 @@ jobs:
     with:
       pr_ref: ${{ github.event.pull_request.head.sha }}
 
+  # Only when main's ci failed on the PR head: is main's ci red on main itself?
+  base-ci:
+    needs: main-ci
+    if: ${{ always() && needs.main-ci.result == 'failure' }}
+    permissions:
+      contents: read
+    uses: ./.github/workflows/ci.yml
+    with:
+      pr_ref: ${{ github.event.pull_request.base.sha }}
+
   # Main's second reviewer. It checks out main and reads the PR as git data, never running it.
+  # Same repository only: it gets the Claude plan secrets, so a fork's PR never starts it (it fails below).
   main-review:
     needs: scope
     if: ${{ needs.scope.outputs.gates_changed == 'true' && github.event.pull_request.head.repo.full_name == github.repository }}
@@ -68,7 +79,7 @@ jobs:
     secrets: inherit
 
   checks-from-main:
-    needs: [scope, main-ci, main-review]
+    needs: [scope, main-ci, base-ci, main-review]
     if: ${{ !cancelled() && !(needs.scope.result == 'success' && needs.scope.outputs.gates_changed == 'false') }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -79,6 +90,7 @@ jobs:
           SCOPE: ${{ needs.scope.result }}
           GATES_CHANGED: ${{ needs.scope.outputs.gates_changed }}
           CI: ${{ needs.main-ci.result }}
+          BASE_CI: ${{ needs.base-ci.result }}
           REVIEW: ${{ needs.main-review.result }}
           SAME_REPO: ${{ github.event.pull_request.head.repo.full_name == github.repository }}
         run: |
@@ -88,12 +100,15 @@ jobs:
           if [ "$SCOPE" != success ] || [ "$GATES_CHANGED" != true ]; then
             say "Could not tell whether the PR changes a gate file (scope: '$SCOPE')."; exit 1
           fi
+          if [ "$SAME_REPO" != true ]; then
+            say "The PR comes from a fork and changes a gate file; main's checks never run a fork's PR here."; exit 1
+          fi
           if [ "$CI" = none ]; then
             say "This repository's tests workflow is not callable, so main's ci did not run; main's review judges the change."
-          elif [ "$SAME_REPO" != true ]; then
-            say "The PR comes from a fork and changes a gate file; main's ci never runs a fork's code."; fail=1
           elif [ "$CI" = success ]; then
             say "Main's ci on the PR head: pass."
+          elif [ "$CI" = failure ] && [ "$BASE_CI" = failure ]; then
+            say "Main's ci fails on main itself too, so it is broken, not weakened by this PR; main's review judges the change."
           else
             say "Main's ci on the PR head: '$CI'. The PR's own ci may pass only because the PR changed it."; fail=1
           fi
