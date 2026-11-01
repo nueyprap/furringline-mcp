@@ -42,6 +42,31 @@ fi
 exec < "$nfp_refs"
 rm -f "$nfp_refs"
 # <<< no-force-push <<<
+# >>> secret-scan >>>
+# Managed by nuey-skills scripts/secret-scan/install.py; edits inside these markers are overwritten.
+# TruffleHog OSS on the commits this push adds (Narathip, 2026-11-01): a live (verified) or unconfirmed
+# (unknown) secret refuses the push. Pinned version; installed once, checksum-checked, when missing.
+# Git gives the refs on stdin once, so they are saved and stdin is reopened for the rest of the hook.
+if [ ! -f .jev/secret_scan.py ] || ! command -v python3 >/dev/null 2>&1; then
+  echo "secret-scan: required scan cannot run (.jev/secret_scan.py or Python missing); push refused." >&2
+  exit 1
+fi
+ss_refs=$(mktemp "${TMPDIR:-/tmp}/secret-scan.XXXXXX") || {
+  echo "secret-scan: cannot save push refs; push refused." >&2
+  exit 1
+}
+if ! cat > "$ss_refs"; then
+  rm -f "$ss_refs"
+  exit 1
+fi
+if ! python3 .jev/secret_scan.py --pre-push --remote "${1:-origin}" < "$ss_refs"; then
+  echo "secret-scan: push refused (scripts/secret-scan/README.md in nuey-skills). Never --no-verify." >&2
+  rm -f "$ss_refs"
+  exit 1
+fi
+exec < "$ss_refs"
+rm -f "$ss_refs"
+# <<< secret-scan <<<
 # >>> jev-gate >>>
 # Managed by nuey-skills scripts/jev-gate/install.py; edits inside these markers are overwritten.
 # Git gives a pre-push hook its refs on stdin, and stdin can be read only once. So save it to a

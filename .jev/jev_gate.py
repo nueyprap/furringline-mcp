@@ -17,7 +17,7 @@ a copy in .jev/jev_gate.py that install.py keeps up to date.
 """
 from __future__ import annotations
 
-VERSION = "0.1.7"
+VERSION = "0.1.8"
 
 import argparse
 import concurrent.futures
@@ -610,11 +610,26 @@ def is_macos():
     return sys.platform == "darwin"
 
 
+KEYCHAIN_LOCKED = "keychain-locked"
+# `security` exits 36 when the login Keychain cannot be read without user interaction: it is
+# locked, as it is in a session started over SSH. 44 means the item is missing.
+KEYCHAIN_LOCKED_EXIT = 36
+KEYCHAIN_STATE = {"locked": False}
+KEYCHAIN_LOCKED_MESSAGE = (
+    "jev-gate: this Mac's Keychain is locked in this session (normal for a run started over SSH), so the Jev "
+    "key was not read. The key was not tested and is not rejected; do not replace it. Start the run in the "
+    "desktop session, or give it TYPESAFE_API_KEY in its environment when it starts (lesson "
+    "2026-10-23-a-run-sent-over-ssh-must-carry-every-key-its-hooks-need).")
+
+
 def key_setup_message(credential_source, failure_kind):
     """One line naming where the key is missing or rejected and the fix. Never the value.
 
     A missing or rejected key blocks everywhere (Narathip, 2026-10-18), so a key that
-    silently stops working cannot hide behind autonomous work."""
+    silently stops working cannot hide behind autonomous work. A Keychain that is locked in
+    this session is not a key problem and never says "rejected" (2026-11-01)."""
+    if credential_source == KEYCHAIN_LOCKED:
+        return KEYCHAIN_LOCKED_MESSAGE
     rejected = failure_kind in ("credential_rejected", "legacy_source_revoked")
     if credential_source == NETWORK_SECRET:
         return ("jev-gate: Jev key missing or rejected in this Claude Code cloud environment: add or "
@@ -632,7 +647,9 @@ def key_setup_message(credential_source, failure_kind):
 def keychain_key():
     """Fast local copy kept by jev-key in the login Keychain; never printed.
 
-    When the copy is missing, ask jev-key to restore it from 1Password once."""
+    When the copy is missing, ask jev-key to restore it from 1Password once. A locked Keychain
+    sets KEYCHAIN_STATE["locked"]; healing cannot help then, since it writes to the same Keychain."""
+    KEYCHAIN_STATE["locked"] = False
     if os.environ.get("TYPESAFE_KEYCHAIN", "on") == "off" or sys.platform != "darwin":
         return ""
     helper = Path.home() / ".local/bin/jev-key"
@@ -645,6 +662,9 @@ def keychain_key():
         if found.returncode == 0:
             key = found.stdout.strip()
             return key if valid_key(key) else ""
+        if found.returncode == KEYCHAIN_LOCKED_EXIT:
+            KEYCHAIN_STATE["locked"] = True
+            return ""
         if attempt or not os.access(helper, os.X_OK):
             return ""
         try:
@@ -668,6 +688,8 @@ def load_credential():
     key = keychain_key()
     if key:
         return key, "keychain"
+    if KEYCHAIN_STATE["locked"]:
+        return "", KEYCHAIN_LOCKED  # never fall through to the revoked file and call it "rejected"
     if (Path.home() / ".config/typesafe/legacy-source-revoked.json").exists():
         return "", "revoked-legacy-file"
     env_file = Path.home() / ".config/typesafe/.env"
@@ -1264,12 +1286,14 @@ def run(args):
 
     if credential_source == "revoked-legacy-file":
         rec.update(failure_kind="legacy_source_revoked", replacement_needed=True)
+    elif credential_source == KEYCHAIN_LOCKED:
+        rec.update(failure_kind="credential_unavailable", replacement_needed=False)
     model_required = ((args.require_model or (args.require_review and rec["jev_status"] != "empty"))
                       and not rec["model_verified"])
     replacement = rec["replacement_needed"]
     real_fail = rec["verdict"] == "fail" and not rec["overridden"]
     setup_block = replacement or (model_required and rec["failure_kind"] in
-                                  ("no_credentials", "credential_rejected"))
+                                  ("no_credentials", "credential_rejected", "credential_unavailable"))
     setup_msg = key_setup_message(credential_source, rec["failure_kind"]) if setup_block else ""
     # Stop blocks once for a setup problem; a repeat Stop cannot fix the key, so let it end.
     loop_release = bool(loop and setup_block and not real_fail)
@@ -1291,7 +1315,8 @@ def run(args):
         if (rec["verdict"] != "pass" or rec["jev_status"] == "unavailable") and not loop_release:
             print(human_report(rec, full=False), file=sys.stderr)
         if blocked:
-            reason = (setup_msg + STOP_ALERT if setup_block and not real_fail else
+            reason = (setup_msg if setup_block and not real_fail and credential_source == KEYCHAIN_LOCKED else
+                      setup_msg + STOP_ALERT if setup_block and not real_fail else
                       "TypeSafe credential replacement is required; Jev review is incomplete."
                       if replacement else
                       "Fresh complete Jev evaluation required; readiness not verified."
