@@ -421,30 +421,47 @@ def staged_entries(repo):
 
 
 def export_blobs(repo, entries, dest):
-    """Write each staged blob to dest/<path> (raw blob: no smudge filter, no LFS download, no symlink made).
-    Returns the total bytes written."""
-    proc = subprocess.run(["git", "-C", str(repo), "cat-file", "--batch"],
-                          input="".join(f"{sha}\n" for _p, sha in entries).encode(), capture_output=True)
-    if proc.returncode != 0:
-        raise RuntimeError(f"git cat-file failed: {proc.stderr.decode('utf-8', 'replace').strip()[:300]}")
-    data, pos, total = proc.stdout, 0, 0
+    """Write each staged blob to dest/<n>/<file name> (raw blob: no smudge filter, no LFS download, no symlink
+    made). One folder per entry, so no two staged paths can meet on the Mac's case- and accent-insensitive disk
+    (README.md and readme.md, Fixtures/ and fixtures/), and the name keeps its extension. Streams from one
+    `git cat-file --batch`, so a large staged file is never held in memory.
+    Returns (bytes written, {path under dest: repo path})."""
     root = os.path.realpath(dest)
-    for path, sha in entries:
-        nl = data.index(b"\n", pos)
-        head = data[pos:nl].split()
-        if len(head) != 3 or head[1] != b"blob":
-            raise RuntimeError(f"staged file {path} could not be read from the index")
-        size = int(head[2])
-        body = data[nl + 1:nl + 1 + size]
-        pos = nl + 1 + size + 1
-        target = os.path.realpath(os.path.join(root, path))
-        if not target.startswith(root + os.sep):
-            raise RuntimeError(f"staged path {path!r} leaves the repository")
-        os.makedirs(os.path.dirname(target), exist_ok=True)
-        with open(target, "wb") as fh:
-            fh.write(body)
-        total += size
-    return total
+    where = {}
+    proc = subprocess.Popen(["git", "-C", str(repo), "cat-file", "--batch"], stdin=subprocess.PIPE,
+                            stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    total = 0
+    try:
+        for n, (path, sha) in enumerate(entries):
+            proc.stdin.write(f"{sha}\n".encode())
+            proc.stdin.flush()
+            head = proc.stdout.readline().split()
+            if len(head) != 3 or head[1] != b"blob":
+                raise RuntimeError(f"staged file {path} could not be read from the index")
+            size = int(head[2])
+            name = os.path.basename(path) or "file"
+            rel = os.path.join(str(n), name)
+            os.mkdir(os.path.join(root, str(n)))
+            where[rel] = path
+            left = size
+            with open(os.path.join(root, rel), "wb") as fh:
+                while left:
+                    chunk = proc.stdout.read(min(left, 1 << 20))
+                    if not chunk:
+                        raise RuntimeError(f"staged file {path} was cut short while reading it")
+                    fh.write(chunk)
+                    left -= len(chunk)
+            proc.stdout.read(1)  # the newline after each object
+            total += size
+    finally:
+        try:
+            proc.stdin.close()
+        except OSError:
+            pass
+        proc.stdout.close()
+        proc.wait()
+        proc.stderr.close()
+    return total, where
 
 
 def fs_scan_cmd(binary, folder):
@@ -457,7 +474,7 @@ def scan_staged(binary, repo, entries, timeout=SCAN_TIMEOUT):
     with tempfile.TemporaryDirectory(prefix="secret-scan-staged-") as tmp:
         folder = os.path.join(tmp, "staged")
         os.mkdir(folder, 0o700)
-        total = export_blobs(repo, entries, folder)
+        total, where = export_blobs(repo, entries, folder)
         try:
             out = subprocess.run(fs_scan_cmd(binary, folder), capture_output=True, text=True, timeout=timeout)
         except subprocess.TimeoutExpired:
@@ -477,6 +494,9 @@ def scan_staged(binary, repo, entries, timeout=SCAN_TIMEOUT):
         raise RuntimeError("TruffleHog read nothing although the staged files hold data")
     for f in findings:
         f["commit"] = ""
+        if f["file"] not in where:
+            raise RuntimeError("TruffleHog named a file that was not staged")
+        f["file"] = where[f["file"]]
     return findings
 
 
@@ -668,7 +688,7 @@ def main(argv=None):
         if not args.staged:
             binary = ensure_binary()
             results = scan_ranges(repo, ranges, binary)
-    except RuntimeError as exc:
+    except (RuntimeError, OSError, ValueError) as exc:
         say(f"could not run: {exc}")
         say("the scan is required; fix the cause and run again. Never --no-verify.")
         if args.github:
@@ -694,5 +714,16 @@ def main(argv=None):
     return 0
 
 
+def run(argv=None):
+    """main(), but an unexpected error is "could not run" (exit 2), never "a secret was found" (exit 1)."""
+    try:
+        return main(argv)
+    except SystemExit:
+        raise
+    except Exception as exc:  # noqa: BLE001  a bug must refuse, and must not read as a finding
+        say(f"could not run: internal error ({type(exc).__name__})")
+        return 2
+
+
 if __name__ == "__main__":
-    sys.exit(main())
+    sys.exit(run())
