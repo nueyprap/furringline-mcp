@@ -1,12 +1,15 @@
 #!/usr/bin/env python3
-"""Secret scan: TruffleHog OSS on the commits a push or pull request adds (Narathip, 2026-11-01).
+"""Secret scan: TruffleHog OSS on what a commit, push or pull request adds (Narathip, 2026-11-01).
 
-Decision: record topic security, c9b4d14b. TruffleHog checks whether a found key is live. A verified
-(live) or unknown (could not confirm) result fails; an unverified one (a pattern the provider says is
-dead) passes. It runs inside the shared checks every change already passes: the pre-push hook block in
-`.githooks/pre-push` and a step of the required `jev` job in `jev-gate.yml`. Installed into each repo as
-`.jev/secret_scan.py` by `scripts/jev-gate/install.py` in nuey-skills (source: `scripts/secret-scan/`).
+Decision: record topic security, c9b4d14b. TruffleHog checks whether a found key is live. On a push or
+pull request a verified (live) or unknown (could not confirm) result fails; an unverified one (a pattern
+the provider says is dead) passes. On a commit (record security-13ee2b, 2026-11-02) every hit fails,
+verified or not, so no key enters even local history. It runs inside the shared checks every change
+already passes: the pre-commit and pre-push hook blocks in `.githooks/` and a step of the required `jev`
+job in `jev-gate.yml`. Installed into each repo as `.jev/secret_scan.py` by `scripts/jev-gate/install.py`
+in nuey-skills (source: `scripts/secret-scan/`).
 
+  python3 .jev/secret_scan.py --staged                              # git pre-commit: the staged files
   python3 .jev/secret_scan.py --pre-push [--remote origin] < refs   # git pre-push: what the push adds
   python3 .jev/secret_scan.py --base origin/main [--github]         # CI: what the pull request adds
   python3 .jev/secret_scan.py --full [--report out.json]            # every commit on every branch
@@ -24,7 +27,12 @@ reviewed allow list `.jev/secret-scan-allow.json`:
 An entry needs a reason of 3 or more words. An entry covers unknown results only; a verified (live) key
 is a real leak to rotate, so it needs `"live_public": true` as well (a key that is public on purpose,
 such as a browser key locked to one site). A change to the list is a change under `.jev/`, so main's
-second reviewer reads it (checks-from-main). Every entry used is printed.
+second reviewer reads it (checks-from-main). Every entry used is printed. The commit scan reads the list
+from the index (the version being committed), the push and CI scans from the commit they test.
+
+`--staged` copies the staged version of each added or changed file (its blob, so no filter or LFS
+download runs) into a private temp folder and runs `trufflehog filesystem` on it: `trufflehog git` has
+no staged option. The temp folder is removed afterwards.
 
 Exit 0 clean (or nothing to scan), 1 a finding, 2 the scan could not run (the caller refuses).
 Standard library only; Python 3.9+.
@@ -59,6 +67,7 @@ ZERO = "0" * 40
 SCAN_TIMEOUT = 600
 FAIL_EXIT = 183  # trufflehog --fail exit code when results are found
 NAME = "secret-scan"
+VERSION_STAMP = ".version-checked"  # next to our pinned binary: "<size> <mtime_ns> <version>" of the last check
 
 
 def say(msg):
@@ -92,6 +101,34 @@ def binary_version(path):
     return m.group(1) if m else None
 
 
+def _stat_key(path):
+    st = os.stat(path)
+    return f"{st.st_size} {st.st_mtime_ns}"
+
+
+def pinned_version_ok(path):
+    """binary_version(path) == PIN_VERSION, remembered for our own install path while the file is unchanged.
+
+    `trufflehog --version` costs about half a second, and the commit scan runs on every commit (target under
+    2 s). The stamp holds the binary's size and mtime, so a replaced or touched binary is checked again."""
+    stamp = Path(path).parent / VERSION_STAMP
+    ours = Path(path).parent == install_dir()
+    try:
+        key = _stat_key(path)
+        if ours and stamp.read_text(encoding="utf-8").strip() == f"{key} {PIN_VERSION}":
+            return True
+    except OSError:
+        pass
+    if binary_version(path) != PIN_VERSION:
+        return False
+    if ours:
+        try:
+            stamp.write_text(f"{key} {PIN_VERSION}\n", encoding="utf-8")
+        except OSError:
+            pass
+    return True
+
+
 def find_binary():
     """The pinned trufflehog, or None. $TRUFFLEHOG_BIN wins (tests, CI); any other must match the pin."""
     env = os.environ.get("TRUFFLEHOG_BIN")
@@ -102,7 +139,7 @@ def find_binary():
     if on_path:
         candidates.append(Path(on_path))
     for cand in candidates:
-        if cand.is_file() and os.access(cand, os.X_OK) and binary_version(cand) == PIN_VERSION:
+        if cand.is_file() and os.access(cand, os.X_OK) and pinned_version_ok(cand):
             return str(cand)
     return None
 
@@ -231,8 +268,12 @@ def fingerprint(detector, raw):
     return hashlib.sha256(f"{detector}\0{raw}".encode("utf-8", "replace")).hexdigest()[:16]
 
 
-def parse_findings(stdout):
-    """Safe finding dicts from TruffleHog JSON lines. The raw value is used only for the fingerprint."""
+def parse_findings(stdout, base_dir=None, all_results=False):
+    """Safe finding dicts from TruffleHog JSON lines. The raw value is used only for the fingerprint.
+
+    Status: verified (live), unknown (the live check failed, VerificationError) or unverified (the provider
+    says it is not live). git mode asks only for verified and unknown, so there anything not verified is
+    unknown; the commit scan asks for all three (all_results). base_dir: filesystem mode's scanned folder, cut from each file path (staged files are copied there)."""
     findings = []
     for line in stdout.splitlines():
         line = line.strip()
@@ -244,13 +285,18 @@ def parse_findings(stdout):
             continue
         if not isinstance(d, dict) or "DetectorName" not in d:
             continue
-        meta = (((d.get("SourceMetadata") or {}).get("Data") or {}).get("Git")) or {}
+        data = ((d.get("SourceMetadata") or {}).get("Data") or {})
+        meta = data.get("Git") or data.get("Filesystem") or {}
         detector = str(d.get("DetectorName") or "unknown-detector")
         raw = d.get("RawV2") or d.get("Raw") or ""
+        file = str(meta.get("file") or "")
+        if base_dir and file:
+            file = os.path.relpath(os.path.realpath(file), os.path.realpath(base_dir))
         findings.append({
             "detector": detector,
-            "status": "verified" if d.get("Verified") else "unknown",
-            "file": str(meta.get("file") or ""),
+            "status": ("verified" if d.get("Verified") else
+                       "unknown" if d.get("VerificationError") or not all_results else "unverified"),
+            "file": file,
             "line": int(meta.get("line") or 0),
             "commit": str(meta.get("commit") or ""),
             "fingerprint": fingerprint(detector, raw),
@@ -268,8 +314,13 @@ def scan_cmd(binary, repo, since=None, head=None):
     return cmd
 
 
-def logged_errors(stderr):
-    """TruffleHog's error-level log messages (its log never holds a found value; cut to 200 characters)."""
+def logged_errors(stderr, skip_paths=None):
+    """TruffleHog's error-level log messages (its log never holds a found value; cut to 200 characters).
+
+    skip_paths(path) -> True drops an error about a file the scanned range does not change. On a ref whose
+    history shares nothing with the clone's default branch (the agent-locks ref), TruffleHog also tries the
+    binary files of that branch with no commit and logs an error for each (2026-11-02); those files are not
+    part of what the push adds. An error with no path is always kept."""
     msgs = []
     for line in (stderr or "").splitlines():
         try:
@@ -277,8 +328,22 @@ def logged_errors(stderr):
         except ValueError:
             continue
         if isinstance(rec, dict) and str(rec.get("level", "")).startswith("error"):
+            path = rec.get("path")
+            if path and skip_paths and skip_paths(str(path)):
+                continue
             msgs.append(str(rec.get("msg", "error"))[:200])
     return msgs
+
+
+def changed_paths(repo, since, head):
+    """Files touched by any commit between since and head (not only the net diff, so a file added and then
+    removed in the range still counts), or None when that cannot be read (then nothing is skipped)."""
+    try:
+        # -z: raw names, so a non-ASCII or quoted name matches the plain path TruffleHog logs.
+        out = git(repo, "log", "-z", "--format=", "--name-only", "--no-renames", "-m", f"{since}..{head}")
+    except Exception:
+        return None
+    return set(x.strip("\n") for x in (out or "").split("\0") if x.strip("\n"))
 
 
 def scanned_bytes(stderr):
@@ -315,7 +380,8 @@ def run_trufflehog(binary, repo, since=None, head=None, timeout=SCAN_TIMEOUT):
     except OSError as exc:
         raise RuntimeError(f"TruffleHog could not start: {exc}")
     findings = parse_findings(out.stdout)
-    errors = logged_errors(out.stderr)
+    changed = changed_paths(repo, since, head) if since and head else None
+    errors = logged_errors(out.stderr, (lambda path: path not in changed) if changed is not None else None)
     if out.returncode not in (0, FAIL_EXIT):
         # stderr is TruffleHog's own log; show only its last error message, never stdout (results).
         raise RuntimeError(f"TruffleHog exited {out.returncode}{': ' + errors[-1] if errors else ''}")
@@ -330,6 +396,87 @@ def run_trufflehog(binary, repo, since=None, head=None, timeout=SCAN_TIMEOUT):
     # Reading 0 bytes of a range that adds lines is a scan that did not happen, never a pass.
     if since and head and scanned_bytes(out.stderr) == 0 and added_lines(repo, since, head) > 0:
         raise RuntimeError("TruffleHog read nothing although the commits add lines (is the commit on a branch?)")
+    return findings
+
+
+# --------------------------------------------------------------------------- staged (pre-commit)
+
+STAGED_FILE_MODES = ("100644", "100755", "120000")  # files and symlinks; a submodule (160000) has no content
+
+
+def staged_entries(repo):
+    """[(path, blob sha)] the commit adds or changes, from the index (GIT_INDEX_FILE when git sets one, as for
+    `git commit -a` or `git commit <paths>`). Deletions are skipped; a rename counts as its new path."""
+    out = subprocess.run(["git", "-C", str(repo), "diff", "--cached", "--raw", "-z", "--no-abbrev", "--no-renames",
+                          "--diff-filter=ACMT"], capture_output=True)
+    if out.returncode != 0:
+        raise RuntimeError(f"git diff --cached failed: {out.stderr.decode('utf-8', 'replace').strip()[:300]}")
+    parts = out.stdout.split(b"\0")
+    entries = []
+    for i in range(0, len(parts) - 1, 2):
+        meta, path = parts[i].decode("ascii", "replace").split(), parts[i + 1].decode("utf-8", "surrogateescape")
+        if len(meta) >= 5 and meta[1] in STAGED_FILE_MODES:
+            entries.append((path, meta[3]))
+    return entries
+
+
+def export_blobs(repo, entries, dest):
+    """Write each staged blob to dest/<path> (raw blob: no smudge filter, no LFS download, no symlink made).
+    Returns the total bytes written."""
+    proc = subprocess.run(["git", "-C", str(repo), "cat-file", "--batch"],
+                          input="".join(f"{sha}\n" for _p, sha in entries).encode(), capture_output=True)
+    if proc.returncode != 0:
+        raise RuntimeError(f"git cat-file failed: {proc.stderr.decode('utf-8', 'replace').strip()[:300]}")
+    data, pos, total = proc.stdout, 0, 0
+    root = os.path.realpath(dest)
+    for path, sha in entries:
+        nl = data.index(b"\n", pos)
+        head = data[pos:nl].split()
+        if len(head) != 3 or head[1] != b"blob":
+            raise RuntimeError(f"staged file {path} could not be read from the index")
+        size = int(head[2])
+        body = data[nl + 1:nl + 1 + size]
+        pos = nl + 1 + size + 1
+        target = os.path.realpath(os.path.join(root, path))
+        if not target.startswith(root + os.sep):
+            raise RuntimeError(f"staged path {path!r} leaves the repository")
+        os.makedirs(os.path.dirname(target), exist_ok=True)
+        with open(target, "wb") as fh:
+            fh.write(body)
+        total += size
+    return total
+
+
+def fs_scan_cmd(binary, folder):
+    return [binary, "filesystem", str(folder), "--json", "--no-update", "--no-ignore-tag",
+            "--results=verified,unknown,unverified", "--fail", "--fail-on-scan-errors"]
+
+
+def scan_staged(binary, repo, entries, timeout=SCAN_TIMEOUT):
+    """TruffleHog filesystem mode on a private copy of the staged files. Every result counts (all_results)."""
+    with tempfile.TemporaryDirectory(prefix="secret-scan-staged-") as tmp:
+        folder = os.path.join(tmp, "staged")
+        os.mkdir(folder, 0o700)
+        total = export_blobs(repo, entries, folder)
+        try:
+            out = subprocess.run(fs_scan_cmd(binary, folder), capture_output=True, text=True, timeout=timeout)
+        except subprocess.TimeoutExpired:
+            raise RuntimeError(f"TruffleHog timed out after {timeout}s")
+        except OSError as exc:
+            raise RuntimeError(f"TruffleHog could not start: {exc}")
+        findings = parse_findings(out.stdout, base_dir=folder, all_results=True)
+    errors = logged_errors(out.stderr)
+    if out.returncode not in (0, FAIL_EXIT):
+        raise RuntimeError(f"TruffleHog exited {out.returncode}{': ' + errors[-1] if errors else ''}")
+    if errors:
+        raise RuntimeError(f"TruffleHog logged {len(errors)} scan error(s), so part of the staged files was not "
+                           f"read: {errors[-1]}")
+    if out.returncode == FAIL_EXIT and not findings:
+        raise RuntimeError("TruffleHog reported results that could not be read")
+    if total > 0 and scanned_bytes(out.stderr) == 0:
+        raise RuntimeError("TruffleHog read nothing although the staged files hold data")
+    for f in findings:
+        f["commit"] = ""
     return findings
 
 
@@ -391,6 +538,9 @@ def allowed_by(finding, entries):
 
 
 def read_allow_text(repo, rev=None):
+    """The allow list in commit rev, in the index (rev ":", what is being committed), or in the work tree."""
+    if rev == ":":
+        return git(repo, "show", f":{ALLOW_FILE}", check=False)
     if rev:
         return git(repo, "show", f"{rev}:{ALLOW_FILE}", check=False)
     path = Path(repo) / ALLOW_FILE
@@ -402,7 +552,8 @@ def read_allow_text(repo, rev=None):
 
 def describe(f):
     where = f"{f['file']}:{f['line']}" if f["file"] else "(no file)"
-    return f"{f['status']} {f['detector']} secret in {where}, commit {f['commit'][:12]}, fingerprint {f['fingerprint']}"
+    when = f"commit {f['commit'][:12]}" if f["commit"] else "staged"
+    return f"{f['status']} {f['detector']} secret in {where}, {when}, fingerprint {f['fingerprint']}"
 
 
 def gh_escape(text):
@@ -441,8 +592,16 @@ def report(findings, entries, problems, github=False):
     return failing
 
 
-def advice(failing):
+def advice(failing, staged=False):
     live = any(f["status"] == "verified" for f in failing)
+    if staged:
+        say("the commit was refused, so the value is not in Git. Take it out of the file, keep it in 1Password "
+            "(vault AI Agents) and read it at run time, then stage and commit again."
+            + (" A LIVE key: rotate it if it was ever pushed, pasted or shared." if live else ""))
+        say(f"If a finding is truly not a secret (a test fixture, an example), add its fingerprint with a reason to "
+            f"{ALLOW_FILE} and stage that too (reviewed with the change). Rule: scripts/secret-scan/README.md in "
+            "nuey-skills. Never --no-verify; an unattended job stops here and reports it, it does not retry.")
+        return
     if live:
         say("a LIVE key is in these commits: rotate it now (it may already be copied), then remove it from the "
             "commits (reset or amend before pushing; once pushed, rotating is what protects you).")
@@ -466,6 +625,7 @@ def scan_ranges(repo, ranges, binary):
 def main(argv=None):
     ap = argparse.ArgumentParser(description="TruffleHog secret scan of what a push or pull request adds.")
     mode = ap.add_mutually_exclusive_group(required=True)
+    mode.add_argument("--staged", action="store_true", help="git pre-commit: scan the staged files (every hit fails)")
     mode.add_argument("--pre-push", action="store_true", help="read git pre-push refs on stdin")
     mode.add_argument("--base", help="CI: scan commits on HEAD that are not on this base ref")
     mode.add_argument("--full", action="store_true", help="scan every commit on every branch")
@@ -485,7 +645,14 @@ def main(argv=None):
             print(ensure_binary())
             return 0
         repo = Path(args.repo).resolve()
-        if args.pre_push:
+        if args.staged:
+            entries = staged_entries(repo)
+            if not entries:
+                return 0
+            binary = ensure_binary()
+            results = [(scan_staged(binary, repo, entries), read_allow_text(repo, ":"))]
+            ranges = []
+        elif args.pre_push:
             refs_text = sys.stdin.read()
             ranges = push_ranges(repo, refs_text, args.remote)
             if not ranges:
@@ -498,8 +665,9 @@ def main(argv=None):
             ranges = [(since, head, added)]
         else:
             ranges = [(None, None, None)]
-        binary = ensure_binary()
-        results = scan_ranges(repo, ranges, binary)
+        if not args.staged:
+            binary = ensure_binary()
+            results = scan_ranges(repo, ranges, binary)
     except RuntimeError as exc:
         say(f"could not run: {exc}")
         say("the scan is required; fix the cause and run again. Never --no-verify.")
@@ -517,8 +685,10 @@ def main(argv=None):
                                                  "failing": failing}, indent=1) + "\n", encoding="utf-8")
     if failing:
         say(f"{len(failing)} secret finding(s); refused.")
-        advice(failing)
+        advice(failing, staged=args.staged)
         return 1
+    if args.staged:
+        return 0  # a clean commit stays quiet
     commits = sum(len(a) for _s, _h, a in ranges if a is not None)
     say(f"clean (TruffleHog {PIN_VERSION}{f', {commits} commit(s)' if commits else ''}).")
     return 0
