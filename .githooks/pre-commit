@@ -1,0 +1,22 @@
+#!/bin/sh
+# >>> secret-scan >>>
+# Managed by nuey-skills scripts/secret-scan/install.py; edits inside these markers are overwritten.
+# TruffleHog OSS on the staged files (Narathip, 2026-11-02, record security-13ee2b): any hit, live or not,
+# refuses the commit, so a key never enters even local history. Known fakes go in .jev/secret-scan-allow.json.
+# A repo whose commits also run unattended (hermes-profile's sync) adds an executable
+# .githooks/secret-scan-notify; it gets the scan's exit code (0 clean, 1 a secret, 2 could not run).
+if [ ! -f .jev/secret_scan.py ] || ! command -v python3 >/dev/null 2>&1; then
+  echo "secret-scan: required scan cannot run (.jev/secret_scan.py or Python missing); commit refused." >&2
+  exit 1
+fi
+python3 .jev/secret_scan.py --staged
+ss_rc=$?
+if [ -x .githooks/secret-scan-notify ]; then
+  .githooks/secret-scan-notify "$ss_rc" || true
+fi
+if [ "$ss_rc" != 0 ]; then
+  echo "secret-scan: commit refused (scripts/secret-scan/README.md in nuey-skills). Never --no-verify." >&2
+  exit 1
+fi
+# <<< secret-scan <<<
+exit 0
