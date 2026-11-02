@@ -9,24 +9,54 @@
 # pull_request_target, so main's copy runs) when a PR changes a gate file. That run checks out the base
 # branch and reads the PR only as git data, so no PR file (.claude/ settings, hooks) is loaded; it posts
 # its own comment (<!-- second-reviewer:main -->) and uses its own concurrency group.
+# After CI (2026-11-02, pre-show step 5): the review starts only when the repository's CI passed on the PR head
+# (workflow_run, which always runs the default branch's copy of this file), and on a new push it reads only the
+# commits since the last reviewed one plus that round's findings (kept in an artifact only the workflow_run run
+# writes, so a PR cannot forge a pass). The job is named `second review`; it posts the required check `review` itself
+# as a commit status on the commit it reviewed (GITHUB_TOKEN, so the source is the GitHub Actions app). Not a check
+# run: one created through the API lands in another workflow's check suite, and a re-run of that workflow orphans it
+# ("Required status check review is expected", nuey-skills#1219).
+# So a commit whose CI failed has no `review` at all, which blocks the merge like a pending check. Never name the
+# job `review` again: a skipped job counts as a passed required check, and a workflow_run job's own check lands
+# on the default branch's head, not on the PR. A repository with no CI sets the repository variable
+# REVIEW_ON_PUSH=true and keeps the review on every push. Callers (gates-from-main, checks-from-main) must grant
+# `statuses: write` and `actions: read`; install.py adds them.
 name: review
 
 on:
   pull_request:
     types: [opened, synchronize, reopened, ready_for_review]
+  workflow_run:
+    workflows: [ci, CI, test, Repository check]
+    types: [completed]
   workflow_dispatch:
   workflow_call:
 
 permissions:
   contents: read
   pull-requests: write
+  statuses: write
+  actions: read
 
+# After CI only a run that will review (a same-repository PR's CI that passed) shares its branch's group, so a newer
+# commit's review replaces an older one; any other workflow_run (a push-event CI, a failed CI) gets a group of its
+# own and can never cancel a review in progress, which would leave `review` stuck as running.
 concurrency:
-  group: review-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}
+  group: review-${{ github.event_name }}-${{ github.event.pull_request.number || (github.event.workflow_run.event == 'pull_request' && contains(fromJSON('["success","skipped"]'), github.event.workflow_run.conclusion) && github.event.workflow_run.head_repository.full_name == github.repository && github.event.workflow_run.head_branch) || github.event.workflow_run.id || github.ref }}
   cancel-in-progress: true
 
 jobs:
   review:
+    # Not `review`: the required check of that name is a commit status this job posts on the reviewed commit.
+    name: second review
+    # pull_request starts nothing unless the repository has no CI (REVIEW_ON_PUSH); workflow_run reviews only a
+    # same-repository PR whose CI passed (a fork's PR never gets the secrets; its review stays missing). A CI whose
+    # job was skipped counts as passed, as it does for the required check itself.
+    if: >-
+      (github.event_name != 'pull_request' || vars.REVIEW_ON_PUSH == 'true') &&
+      (github.event_name != 'workflow_run' || (github.event.workflow_run.event == 'pull_request' &&
+      contains(fromJSON('["success","skipped"]'), github.event.workflow_run.conclusion) &&
+      github.event.workflow_run.head_repository.full_name == github.repository))
     runs-on: ubuntu-latest
     timeout-minutes: 45
     env:
@@ -39,6 +69,25 @@ jobs:
       TRUSTED_HEAD: ${{ github.event_name == 'pull_request_target' && github.event.pull_request.head.sha || '' }}
       TRUSTED_NOTE: >-
         ${{ github.event_name == 'pull_request_target' && format('This is main''s own reviewer, run because the pull request changes a gate file (a check''s workflow or script). The working tree on disk is the base branch, NOT the pull request: the pull request head is commit {0}. Read the diff and file list in .second-review/, read a changed file as the pull request has it with `git show {0}:<file>`, and wherever these instructions say HEAD use {0}. Fail a change that weakens, skips or bypasses a check (a test or gate that can no longer fail, a lower threshold, a removed step) unless the description gives a real reason.', github.event.pull_request.head.sha) || '' }}
+      # Added after REVIEW_PROMPT only when the Scope step found an earlier round of this review on an ancestor
+      # commit (code_mode=incremental, 2026-11-02): read what is new, not the whole pull request again.
+      INCREMENTAL_NOTE: |
+        This is a re-review: this pull request was reviewed before, and the author pushed new commits since.
+        Read .second-review/previous.md (the earlier round: its verdict, its problems and the newest commits) and
+        .second-review/newest.patch (the changes of those newest commits) first. Do not start a fresh hunt over the
+        whole pull request: the rest was read in the earlier round. Use diff.patch, merges.md and the files only to
+        understand the newest changes.
+        - Take each earlier problem in turn. Drop it when the newest commits fix it, or when the description now
+          gives a real reason it is not a problem. Re-raise it only when it is still there, and say why the fix
+          does not work.
+        - A new problem must come from the newest commits, or from a merge that previous.md lists as not git's
+          own automatic merge (question 6). A problem in code the earlier round already read and did not raise is
+          a note, unless it is a secret, a loss of data that cannot be got back, or a way to skip a check before
+          the default branch.
+        - Two checks always cover the whole pull request, because they change between rounds: question 1 against
+          the description as it is now (pr.md; it may have been edited since), and question 4 for every test file
+          the newest commits add or change: is it real, and does the `ci` workflow actually run it?
+        - An earlier verdict is not a reason by itself: pass or fail on what the pull request does now.
       REVIEW_PROMPT: |
         You are the second reviewer for a pull request in ${{ github.repository }}. Another agent
         wrote it and will merge it by itself once the checks pass, with no human review. You are the
@@ -232,24 +281,78 @@ jobs:
         --disallowedTools "Edit,Write,NotebookEdit,WebFetch,WebSearch"
         --json-schema '{"type":"object","additionalProperties":false,"required":["verdict","summary","problems","notes"],"properties":{"verdict":{"type":"string","enum":["pass","fail"]},"summary":{"type":"string","description":"One to three plain sentences: what the rule change does and your overall judgement."},"problems":{"type":"array","description":"Only problems that meet the bar; empty when verdict is pass. One item per flaw.","items":{"type":"object","additionalProperties":false,"required":["kind","file","scenario","what","fix","bar","earlier"],"properties":{"kind":{"type":"string","enum":["wrong-scope","perverse-incentive","blocks-legit-work","cross-agent-risk","clash","duplicate","cost","unenforceable","fails-closed","loop","other"]},"file":{"type":"string"},"line":{"type":"integer"},"scenario":{"type":"string","description":"Who, doing what, gets which result."},"what":{"type":"string"},"fix":{"type":"string"},"bar":{"type":"string","description":"Why it meets the bar: what this change brings in or makes worse, why it is likely in normal use, and the harm."},"earlier":{"type":"string","enum":["new","re-raised"],"description":"re-raised: a point from previous.md whose fix fails or was not made; new: anything else."}}}},"notes":{"type":"array","description":"Optional non-blocking remarks, at most 5.","items":{"type":"string"}}}}'
     steps:
+      # After CI (workflow_run): find the open PR whose head is the commit CI just passed. A newer push or a
+      # closed PR means there is nothing to review here (the newer commit's CI starts its own review).
+      - name: Pull request
+        id: pr
+        if: github.event_name == 'workflow_run'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          SHA: ${{ github.event.workflow_run.head_sha }}
+          PRS: ${{ toJSON(github.event.workflow_run.pull_requests) }}
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import json, os, subprocess
+          def gh(path):
+              p = subprocess.run(["gh", "api", path], capture_output=True, text=True)
+              return json.loads(p.stdout or "null") if p.returncode == 0 else None
+          repo, sha = os.environ["REPO"], os.environ["SHA"]
+          nums = [p["number"] for p in json.loads(os.environ.get("PRS") or "[]") or [] if (p.get("head") or {}).get("sha") == sha]
+          if not nums:
+              nums = [p["number"] for p in gh(f"repos/{repo}/commits/{sha}/pulls") or []
+                      if p.get("state") == "open" and p["head"]["sha"] == sha and (p["head"].get("repo") or {}).get("full_name") == repo]
+          out = {"go": "false"}
+          for n in nums:
+              pr = gh(f"repos/{repo}/pulls/{n}") or {}
+              if pr.get("state") == "open" and pr["head"]["sha"] == sha:
+                  out = {"go": "true", "number": str(n), "base": pr["base"]["ref"], "head_ref": pr["head"]["ref"]}
+                  break
+          if out["go"] == "false":
+              print(f"::notice::No open pull request has {sha[:9]} as its head now (a newer push or a closed PR): nothing to review.")
+          with open(os.environ["GITHUB_OUTPUT"], "a") as g:
+              g.writelines(f"{k}={v}\n" for k, v in out.items())
+          print(json.dumps(out))
+          PY
+
+      # The required check `review` on the commit under review: a commit status, pending until the Verdict step sets
+      # it (not on a call from gates-from-main / checks-from-main: that run is main's reviewer with its own check).
+      - name: Review check
+        id: check
+        if: github.event_name != 'pull_request_target' && steps.pr.outputs.go != 'false'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          SHA: ${{ github.event.workflow_run.head_sha || github.event.pull_request.head.sha || github.sha }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        shell: bash
+        run: |
+          gh api -X POST "repos/$REPO/statuses/$SHA" -f state=pending -f context=review \
+            -f description="Second review: running" -f target_url="$RUN_URL" >/dev/null \
+            || echo "::warning::could not mark the review status as pending"
+
       # A normal run checks out the PR head. Under pull_request_target (called by gates-from-main) it checks
       # out the base branch (the default ref) without a stored token; the Scope step fetches the PR head as data.
       - uses: actions/checkout@v4
+        if: steps.pr.outputs.go != 'false'
         with:
           fetch-depth: 0
-          ref: ${{ github.event_name != 'pull_request_target' && (github.event.pull_request.head.sha || github.sha) || '' }}
+          ref: ${{ github.event_name == 'workflow_run' && github.event.workflow_run.head_sha || (github.event_name != 'pull_request_target' && (github.event.pull_request.head.sha || github.sha) || '') }}
           persist-credentials: ${{ github.event_name != 'pull_request_target' }}
 
       - name: Scope
         id: scope
+        if: steps.pr.outputs.go != 'false'
         env:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
-          PR_NUMBER: ${{ github.event.pull_request.number }}
-          BASE_REF: ${{ github.event.pull_request.base.ref || github.event.repository.default_branch }}
-          HEAD_REF: ${{ github.event.pull_request.head.ref || github.ref_name }}
+          PR_NUMBER: ${{ steps.pr.outputs.number || github.event.pull_request.number }}
+          BASE_REF: ${{ steps.pr.outputs.base || github.event.pull_request.base.ref || github.event.repository.default_branch }}
+          HEAD_REF: ${{ steps.pr.outputs.head_ref || github.event.pull_request.head.ref || github.ref_name }}
           HAS_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN_WORK != '' || secrets.CLAUDE_CODE_OAUTH_TOKEN_WORKMAX != '' || secrets.CLAUDE_CODE_OAUTH_TOKEN != '' || secrets.ANTHROPIC_API_KEY_CONSOLE_WORK != '' || secrets.ANTHROPIC_API_KEY_CONSOLE != '' }}
           SKIP_BRANCHES: ${{ vars.REVIEW_SKIP_BRANCHES }}
+          EVENT: ${{ github.event_name }}
         shell: bash
         run: |
           python3 - <<'PY'
@@ -356,6 +459,85 @@ jobs:
                   patch = patch[:limit] + "\n... cut: run `git log -p` on the commits above for the rest\n"
               return {"previous.md": "".join(parts), "newest.patch": patch}
           # --- rule files: end ---
+
+          # --- after ci: start (scripts/second-reviewer/eval_after_ci.py replays real PRs through this same block) ---
+          # Re-push (2026-11-02): each review after CI keeps its round (the commit it reviewed, the code and rule
+          # verdicts and problems) in the artifact second-review-round-pr<N>. Only a run of this file on workflow_run
+          # (always the default branch's copy) writes one, and only such an artifact is read (trusted_round below):
+          # a PR's own workflow can post comments and checks as github-actions[bot], so a comment could forge a pass.
+          def valid_round(d):
+              """d when it is a well-formed round {pr, sha, code, rules}, else None."""
+              import re as _r
+              if not isinstance(d, dict) or not _r.fullmatch(r"[0-9a-f]{40}", str(d.get("sha"))):
+                  return None
+              for part in ("code", "rules"):
+                  x = d.get(part)
+                  if x is not None and (not isinstance(x, dict) or x.get("verdict") not in ("pass", "fail")
+                                        or not isinstance(x.get("problems"), list)):
+                      return None
+              return d
+
+
+          def as_prev(d, part):
+              """The {sha, verdict, problems} of one part of a round, or None."""
+              return dict(d[part], sha=d["sha"]) if d and d.get(part) else None
+
+
+          def code_round_plan(prev, head, base, git):
+              """(mode, info) for this round. prev: the earlier round or None; head: full commit id; base: the base
+              branch ref (origin/<base>); git(*args) returns git's output ('' on error).
+              full         no earlier round, or its commit is not an ancestor of head (first push, force-push)
+              reuse        the earlier round passed, and since then only merges of the base came, each exactly git's
+                           own automatic merge (no conflict resolved by hand): nothing new to review
+              incremental  the commits since the earlier round (info["own"]), merges not git's own (info["dirty"]),
+                           plus the earlier round's problems
+              The same commit again (a CI re-run) reuses a pass and reviews a fail afresh."""
+              if not prev:
+                  return "full", {}
+              if prev["sha"] == head:
+                  return ("reuse" if prev["verdict"] == "pass" else "full"), {"own": [], "dirty": [], "exclude": []}
+              if git("merge-base", prev["sha"], head).strip() != prev["sha"]:
+                  return "full", {}
+              exclude, dirty = [], []
+              for ln in git("rev-list", "--merges", "--parents", f"{prev['sha']}..{head}").splitlines():
+                  m, *parents = ln.split()
+                  if len(parents) >= 2 and all(git("merge-base", p, base).strip() == p for p in parents[1:]):
+                      exclude += parents[1:]  # a merge of the base: its commits are not the author's
+                  if git("show", "--remerge-diff", "--format=", m).strip():
+                      dirty.append(m)  # a conflict resolved by hand, or a merge result that is not git's own
+              own = [ln for ln in git("log", "--no-merges", "--format=%H %s", head, f"^{prev['sha']}",
+                                      *[f"^{p}" for p in exclude]).splitlines() if ln.strip()]
+              info = {"own": own, "dirty": dirty, "exclude": exclude}
+              if not own and not dirty and prev["verdict"] == "pass":
+                  return "reuse", info
+              return "incremental", info
+
+
+          def code_round_files(prev, info, head, git, limit=200000):
+              """{previous.md, newest.patch} for an incremental round."""
+              sha = prev["sha"]
+              probs = prev.get("problems") or []
+              parts = ["# Earlier round of this code review\n\n",
+                       f"This pull request was reviewed at commit {sha[:9]}: {prev['verdict'].upper()}, {len(probs)} problem(s). "
+                       "The commits pushed since then (merges of the base left out) are the newest commits:\n\n",
+                       "".join(f"- {ln[:9]} {ln[41:]}\n" for ln in info["own"]) or "- (none: only merges)\n",
+                       "\nMerges since then that are not git's own automatic merge (check them for lost changes, question 6): "
+                       + (", ".join(m[:9] for m in info["dirty"]) or "none") + "\n\n",
+                       f"newest.patch has the newest commits' changes. `git diff {sha[:9]} HEAD` shows everything since "
+                       "that round, merges of the base included.\n"]
+              if probs:
+                  parts.append("\n## Problems the earlier round raised\n")
+                  for i, p in enumerate(probs, 1):
+                      where = str(p.get("file") or "") + (f":{p['line']}" if p.get("line") else "")
+                      parts.append(f"\n{i}. [{p.get('kind')}] `{where}`: {p.get('what')}\n   Fix asked: {p.get('fix')}\n")
+              patch = git("log", "-p", "--reverse", "--no-merges", "--format=commit %H%n%s%n", head, f"^{sha}",
+                          *[f"^{p}" for p in info["exclude"]])
+              for m in info["dirty"]:
+                  patch += f"\nmerge {m} (how it differs from git's own automatic merge)\n" + git("show", "--remerge-diff", "--format=", m)
+              if len(patch) > limit:
+                  patch = patch[:limit] + "\n... cut: run `git log -p` on the commits above for the rest\n"
+              return {"previous.md": "".join(parts), "newest.patch": patch}
+          # --- after ci: end ---
 
           out = {}
           base = os.environ["BASE_REF"]
@@ -497,6 +679,57 @@ jobs:
               f.write("\n".join(files) + "\n")
           with open(".second-review/diff.patch", "w") as f:
               f.write(sh("git", "diff", "--stat", f"{mb}...{HEAD}") + "\n" + sh("git", "diff", f"{mb}...{HEAD}"))
+          # Earlier rounds (2026-11-02): after CI, a new push reviews only what came since the last trusted round
+          # (code_round_plan), or reuses a pass when only clean merges of the base came since. The PR comments are still
+          # read for the rule review's own earlier-round notes (previous.md), which only guide its prompt.
+          bodies = []
+          if pr:
+              import base64
+              raw = sh("gh", "api", f"repos/{os.environ['REPO']}/issues/{pr}/comments", "--paginate", "--jq",
+                       '.[] | select(.user.login == "github-actions[bot]") | .body | @base64', check=False)
+              bodies = [base64.b64decode(line).decode("utf-8", "replace") for line in raw.split()]
+          head_full = sh("git", "rev-parse", HEAD).strip()
+          git_out = lambda *a: subprocess.run(["git", *a], capture_output=True, text=True).stdout  # noqa: E731
+
+          def trusted_round():
+              """The newest round kept by a run of this file on workflow_run, or None (see valid_round)."""
+              import io, zipfile
+              if os.environ.get("EVENT") != "workflow_run" or not pr:
+                  return None
+              repo = os.environ["REPO"]
+              arts = json.loads(sh("gh", "api", f"repos/{repo}/actions/artifacts?name=second-review-round-pr{pr}&per_page=30",
+                                   check=False) or "{}").get("artifacts") or []
+              for a in sorted(arts, key=lambda a: a.get("id") or 0, reverse=True)[:10]:
+                  if a.get("expired"):
+                      continue
+                  run = json.loads(sh("gh", "api", f"repos/{repo}/actions/runs/{(a.get('workflow_run') or {}).get('id')}",
+                                      check=False) or "{}")
+                  if run.get("event") != "workflow_run" or run.get("path") != ".github/workflows/review.yml":
+                      continue  # not written by this file's trusted after-CI run: ignore
+                  z = subprocess.run(["gh", "api", f"repos/{repo}/actions/artifacts/{a['id']}/zip"], capture_output=True).stdout
+                  try:
+                      d = json.loads(zipfile.ZipFile(io.BytesIO(z)).read("round.json"))
+                  except Exception:
+                      continue
+                  if valid_round(d) and str(d.get("pr")) == str(pr):
+                      return d
+              return None
+
+          code_mode, rule_mode = "full", "full"
+          last_round = trusted_round() if out.get("skip") != "true" else None
+          prev_code = as_prev(last_round, "code")
+          if out.get("skip") != "true" and out.get("code") == "true":
+              code_mode, code_info = code_round_plan(prev_code, head_full, f"origin/{base}", git_out)
+              if code_mode == "incremental":
+                  for name, text in code_round_files(prev_code, code_info, head_full, git_out).items():
+                      with open(f".second-review/{name}", "w") as f:
+                          f.write(text)
+          if rules and out.get("skip") != "true":
+              rule_mode = code_round_plan(as_prev(last_round, "rules"), head_full, f"origin/{base}", git_out)[0]
+              rule_mode = "reuse" if rule_mode == "reuse" else "full"
+          need = (out.get("code") == "true" and code_mode != "reuse") or (out.get("rules") == "true" and rule_mode != "reuse")
+          out.update(code_mode=code_mode, rule_mode=rule_mode, need_claude="true" if need else "false",
+                     prev_sha=prev_code["sha"] if prev_code and code_mode != "full" else "")
           if rules:  # the rule review's packet (same files as scripts/rule-review/rule_review.py writes)
               os.makedirs(".rule-review", exist_ok=True)
               for name in ("pr.md", "files.txt", "diff.patch"):
@@ -509,19 +742,13 @@ jobs:
               # Earlier rounds (2026-10-31): the last round's points and the commits pushed since, from the hidden
               # line each reviewer's PR comment keeps (round_note, Verdict step), so a new push is no fresh hunt.
               rounds = []
-              if pr:
-                  import base64
-                  who = {"<!-- second-reviewer -->": "this pull request's reviewer",
-                         "<!-- second-reviewer:main -->": "main's reviewer (gate files changed)"}
-                  raw = sh("gh", "api", f"repos/{os.environ['REPO']}/issues/{pr}/comments", "--paginate", "--jq",
-                           '.[] | select(.user.login == "github-actions[bot]") | .body | @base64', check=False)
-                  for line in raw.split():
-                      text = base64.b64decode(line).decode("utf-8", "replace")
-                      rnd = read_round(text) if text.split("\n", 1)[0] in who else None
-                      if rnd:
-                          rounds.append((who[text.split("\n", 1)[0]], rnd))
-              earlier = round_files(rounds, sh("git", "rev-parse", HEAD).strip(), mb,
-                                    lambda *a: subprocess.run(["git", *a], capture_output=True, text=True).stdout)
+              who = {"<!-- second-reviewer -->": "this pull request's reviewer",
+                     "<!-- second-reviewer:main -->": "main's reviewer (gate files changed)"}
+              for text in bodies:
+                  rnd = read_round(text) if text.split("\n", 1)[0] in who else None
+                  if rnd:
+                      rounds.append((who[text.split("\n", 1)[0]], rnd))
+              earlier = round_files(rounds, head_full, mb, git_out)
               for name, text in earlier.items():
                   with open(f".rule-review/{name}", "w") as f:
                       f.write(text)
@@ -534,7 +761,7 @@ jobs:
           PY
 
       - name: Install the newest Claude Code
-        if: steps.scope.outputs.skip != 'true' && steps.scope.outputs.missing_token != 'true'
+        if: steps.pr.outputs.go != 'false' && steps.scope.outputs.skip != 'true' && steps.scope.outputs.missing_token != 'true' && steps.scope.outputs.need_claude != 'false'
         shell: bash
         run: |
           curl -fsSL https://claude.ai/install.sh | bash -s -- stable
@@ -548,7 +775,7 @@ jobs:
       # scripts/claude-keys/key_chain.py, copied below by scripts/claude-keys/embed.py.
       - name: Review
         id: claude
-        if: steps.scope.outputs.skip != 'true' && steps.scope.outputs.missing_token != 'true'
+        if: steps.pr.outputs.go != 'false' && steps.scope.outputs.skip != 'true' && steps.scope.outputs.missing_token != 'true' && steps.scope.outputs.need_claude != 'false'
         continue-on-error: true
         env:
           CLAUDE_CODE_OAUTH_TOKEN_WORK: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN_WORK }}
@@ -560,6 +787,8 @@ jobs:
           CLAUDE_USAGE_KEY: ${{ secrets.CLAUDE_USAGE_KEY }}
           KEY_ROOM_CAP: ${{ vars.KEY_ROOM_CAP }}
           CODE: ${{ steps.scope.outputs.code }}
+          CODE_MODE: ${{ steps.scope.outputs.code_mode }}
+          ROUND_NOTE: ${{ steps.scope.outputs.code_mode == 'incremental' && env.INCREMENTAL_NOTE || '' }}
         shell: bash
         run: |
           cat > "$RUNNER_TEMP/key_chain.py" <<'KEYCHAIN'
@@ -943,9 +1172,10 @@ jobs:
               sys.exit(main())
           KEYCHAIN
           # A PR whose only reviewed files are agent rules gets the rule review alone (next step reuses key_chain.py).
-          if [ "$CODE" != "false" ]; then
+          # A reused pass (code_mode=reuse: only clean merges of the base since the last passed round) runs nothing.
+          if [ "$CODE" != "false" ] && [ "$CODE_MODE" != "reuse" ]; then
             python3 "$RUNNER_TEMP/key_chain.py" run --out "$RUNNER_TEMP/review-result.json" --args-env REVIEW_ARGS \
-              -- "$CLAUDE_BIN" -p "$REVIEW_PROMPT$TRUSTED_NOTE" --output-format json
+              -- "$CLAUDE_BIN" -p "$REVIEW_PROMPT$TRUSTED_NOTE$ROUND_NOTE" --output-format json
           fi
 
       # The rule review (2026-10-25): agent rules get a second, separate look at scope, incentives and edge
@@ -953,7 +1183,7 @@ jobs:
       # both, down the same key chain.
       - name: Rule review
         id: rules
-        if: steps.scope.outputs.skip != 'true' && steps.scope.outputs.missing_token != 'true' && steps.scope.outputs.rules == 'true'
+        if: steps.pr.outputs.go != 'false' && steps.scope.outputs.skip != 'true' && steps.scope.outputs.missing_token != 'true' && steps.scope.outputs.rules == 'true' && steps.scope.outputs.rule_mode != 'reuse'
         continue-on-error: true
         env:
           CLAUDE_CODE_OAUTH_TOKEN_WORK: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN_WORK }}
@@ -970,7 +1200,8 @@ jobs:
             -- "$CLAUDE_BIN" -p "$RULE_PROMPT$TRUSTED_NOTE" --output-format json
 
       - name: Verdict
-        if: ${{ !cancelled() }}
+        id: verdict
+        if: ${{ !cancelled() && steps.pr.outputs.go != 'false' }}
         env:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
@@ -991,7 +1222,13 @@ jobs:
           RULE_PLAN_TOKEN: ${{ steps.rules.outputs.key }}
           RULE_KEYS_TRIED: ${{ steps.rules.outputs.tried }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+          HEAD_SHA: ${{ github.event.workflow_run.head_sha || github.event.pull_request.head.sha || github.sha }}
+          CODE_MODE: ${{ steps.scope.outputs.code_mode }}
+          RULE_MODE: ${{ steps.scope.outputs.rule_mode }}
+          PREV_SHA: ${{ steps.scope.outputs.prev_sha }}
+          BASE_REF: ${{ steps.pr.outputs.base || github.event.pull_request.base.ref || github.event.repository.default_branch }}
+          PUBLISH: ${{ github.event_name != 'pull_request_target' }}
+          EVENT: ${{ github.event_name }}
           MARK: ${{ github.event_name == 'pull_request_target' && '<!-- second-reviewer:main -->' || '<!-- second-reviewer -->' }}
           LABEL: ${{ github.event_name == 'pull_request_target' && 'Second review (main''s reviewer, gate files changed)' || 'Second review' }}
         shell: bash
@@ -1063,6 +1300,10 @@ jobs:
               return "<!-- rule-review-round: " + _b64.b64encode(data.encode()).decode() + " -->"
           # --- round note: end ---
           sha = (env.get("HEAD_SHA") or "")[:7]
+          prev = (env.get("PREV_SHA") or "")[:9]
+          reused = (f"Reused the pass of commit {prev}: the only commits since then are merges of "
+                    f"{env.get('BASE_REF') or 'the base branch'} that git made by itself (no conflict resolved by hand), "
+                    "so there is nothing new to review. No Claude usage.")
           runs = []  # (kind, verdict, lines, usage, key, tried)
           if env.get("SKIP") == "true":
               verdict, lines = "skip", [f"Skipped: {env.get('REASON')}. No Claude usage."]
@@ -1070,11 +1311,19 @@ jobs:
               verdict, lines = "fail", ["**Could not review:** this repository has no `CLAUDE_CODE_OAUTH_TOKEN_WORK`, "
                                         "`CLAUDE_CODE_OAUTH_TOKEN` or `ANTHROPIC_API_KEY_CONSOLE` Actions secret. Set it (nuey-skills `scripts/second-reviewer/set-secrets.sh`), then re-run this job."]
           else:
-              if env.get("CODE") != "false":
+              if env.get("CODE") != "false" and env.get("CODE_MODE") == "reuse":
+                  runs.append(("code", "pass", [reused], {}, None, ""))
+              elif env.get("CODE") != "false":
                   u = usage(env.get("EXECUTION_FILE"))
                   runs.append(("code", *judged(env.get("STRUCTURED"), env.get("OUTCOME"), u, env.get("KEYS_TRIED")),
                                u, env.get("PLAN_TOKEN"), env.get("KEYS_TRIED")))
-              if env.get("RULES") == "true":
+                  if env.get("CODE_MODE") == "incremental" and runs[-1][1] in ("pass", "fail") and \
+                          not runs[-1][2][0].startswith("**Could not review"):
+                      runs[-1][2].append(f"\n<sub>Re-review: read the commits since {prev} and that round's findings.</sub>")
+              if env.get("RULES") == "true" and env.get("RULE_MODE") == "reuse":
+                  runs.append(("rules", "pass", ["Reused the earlier rule-review pass: the only commits since then are merges "
+                                                 "of the base that git made by itself, so no rule changed."], {}, None, ""))
+              elif env.get("RULES") == "true":
                   u = usage(env.get("RULE_EXECUTION_FILE"))
                   runs.append(("rules", *judged(env.get("RULE_STRUCTURED"), env.get("RULE_OUTCOME"), u,
                                                 env.get("RULE_KEYS_TRIED"), scenario=True),
@@ -1115,9 +1364,33 @@ jobs:
           full_sha = env.get("HEAD_SHA") or ""
           if rule_out and rule_out.get("verdict") in ("pass", "fail") and re.fullmatch(r"[0-9a-f]{40}", full_sha):
               note = round_note(full_sha, rule_out["verdict"], rule_out.get("problems"))
+          elif env.get("RULES") == "true" and env.get("RULE_MODE") == "reuse" and re.fullmatch(r"[0-9a-f]{40}", full_sha):
+              note = round_note(full_sha, "pass", [])
           elif old:
               found = re.search(r"<!-- rule-review-round: [A-Za-z0-9+/=]+ -->", old)
               note = found.group(0) if found else ""
+          # The round for the next push (2026-11-02): after CI only, kept as the artifact second-review-round-pr<N>
+          # (step "Keep this round"); the Scope step trusts only artifacts from this file's workflow_run runs.
+          def part(kind, structured, mode):
+              if mode == "reuse":
+                  return {"verdict": "pass", "problems": []}
+              try:
+                  o = json.loads(structured or "")
+              except ValueError:
+                  return None
+              if not isinstance(o, dict) or o.get("verdict") not in ("pass", "fail"):
+                  return None
+              return {"verdict": o["verdict"], "problems": [{k: x.get(k) for k in ("kind", "file", "line", "what", "fix")}
+                                                            for x in o.get("problems") or [] if isinstance(x, dict)]}
+          kept = {"pr": str(env.get("PR") or ""), "sha": full_sha,
+                  "code": part("code", env.get("STRUCTURED"), env.get("CODE_MODE")) if env.get("CODE") == "true" else None,
+                  "rules": part("rules", env.get("RULE_STRUCTURED"), env.get("RULE_MODE")) if env.get("RULES") == "true" else None}
+          keep = (env.get("EVENT") == "workflow_run" and verdict != "skip" and kept["pr"] and (kept["code"] or kept["rules"])
+                  and re.fullmatch(r"[0-9a-f]{40}", full_sha))
+          if keep and env.get("RUNNER_TEMP"):
+              os.makedirs(os.path.join(env["RUNNER_TEMP"], "second-review-round"), exist_ok=True)
+              with open(os.path.join(env["RUNNER_TEMP"], "second-review-round", "round.json"), "w") as f:
+                  json.dump(kept, f)
           body = f"{MARK}\n### {head}\n\n" + "\n".join(lines) + footer + (f"\n{note}" if note else "")
           with open(env["GITHUB_STEP_SUMMARY"], "a") as f:
               f.write(body + "\n")
@@ -1125,10 +1398,56 @@ jobs:
               usage_line = json.dumps({"verdict": v, "kind": kind, "plan_token": key,
                                        **{k: u.get(k) for k in ("model", "turns", "tokens_in", "tokens_out", "api_equiv_usd")}})
               print("second-reviewer-usage " + usage_line)
+          comment_url = ""
           if pr and verdict != "skip":
               args = (["-X", "PATCH", f"repos/{env['REPO']}/issues/comments/{cid[-1]}"] if cid
                       else ["-X", "POST", f"repos/{env['REPO']}/issues/{pr}/comments"])
-              subprocess.run(["gh", "api", *args, "-f", f"body={body}"], capture_output=True, text=True)
+              res = subprocess.run(["gh", "api", *args, "-f", f"body={body}"], capture_output=True, text=True)
+              try:
+                  comment_url = str(json.loads(res.stdout or "{}").get("html_url") or "")
+              except (ValueError, AttributeError):
+                  comment_url = ""
+          # The required check `review` on the reviewed commit (2026-11-02): a commit status, success for pass or skip,
+          # failure for FAIL and "Could not review", linking to the PR comment. When it cannot be written the commit
+          # keeps no `review` (or a pending one), which blocks the merge (fail closed); the job then fails.
+          posted = True
+          if env.get("PUBLISH") == "true" and re.fullmatch(r"[0-9a-f]{40}", full_sha):
+              n = len(re.findall(r"^\d+\. \*\*", "\n".join(lines), re.M))
+              desc = head.replace(f"{LABEL}: ", "Second review: ") + (f", {n} problem(s)" if verdict == "fail" and n else "")
+              desc = (desc + ". Details: the PR comment")[:140]
+              p = subprocess.run(["gh", "api", "-X", "POST", f"repos/{env['REPO']}/statuses/{full_sha}",
+                                  "-f", f"state={'failure' if verdict == 'fail' else 'success'}", "-f", "context=review",
+                                  "-f", f"description={desc}", "-f", f"target_url={comment_url or env['RUN_URL']}"],
+                                 capture_output=True, text=True)
+              if p.returncode != 0:
+                  posted = False
+                  print(f"::error::could not write the review status: {(p.stderr or p.stdout)[:300]}")
           print(body)
-          sys.exit(1 if verdict == "fail" else 0)
+          if env.get("GITHUB_OUTPUT"):
+              with open(env["GITHUB_OUTPUT"], "a") as g:
+                  g.write(f"verdict={verdict}\n" + ("round=true\n" if keep and env.get("RUNNER_TEMP") else ""))
+          # After CI the job's own check sits on the default branch's head, so it fails only when the review status
+          # could not be written; on the other events it fails with the verdict, as before.
+          if env.get("EVENT") == "workflow_run":
+              sys.exit(0 if posted else 1)
+          sys.exit(1 if verdict == "fail" or not posted else 0)
           PY
+
+      # The next push reads this round (see the Scope step's trusted_round): only this file's after-CI run writes it.
+      - name: Keep this round
+        if: ${{ !cancelled() && steps.verdict.outputs.round == 'true' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: second-review-round-pr${{ steps.scope.outputs.pr }}
+          path: ${{ runner.temp }}/second-review-round/round.json
+          retention-days: 30
+          if-no-files-found: ignore
+
+      # usage.py counts these two: after CI the job itself passes (the verdict is on the `review` check), so a failed
+      # or reused review shows here.
+      - name: "Verdict: FAIL"
+        if: ${{ !cancelled() && steps.verdict.outputs.verdict == 'fail' }}
+        run: echo "The second review failed this pull request; the review check on its head commit says why."
+      - name: "Verdict: reused"
+        if: ${{ !cancelled() && steps.scope.outputs.skip != 'true' && steps.scope.outputs.need_claude == 'false' }}
+        run: echo "Reused the last pass; no Claude run."
