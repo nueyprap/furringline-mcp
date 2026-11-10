@@ -41,7 +41,9 @@ jobs:
         run: python3 .jev/plan_login_check.py --base "origin/$BASE_REF" --github
 
       # TruffleHog OSS (Narathip, 2026-11-01): fails on a live (verified) or unconfirmed (unknown) secret in the
-      # commits this pull request adds. Pinned version, sha256-checked download; never prints a secret
+      # commits this pull request adds. Pinned version, sha256-checked download, retried, then TruffleHog's Docker
+      # Hub layer of the same binary (hash-pinned) when GitHub release downloads are down; no verified binary
+      # fails the step. No Actions cache (checks-from-main keeps gate workflows cache-free). Never prints a secret
       # (scripts/secret-scan in nuey-skills). Reviewed exceptions: .jev/secret-scan-allow.json.
       - name: Secret scan
         if: ${{ !cancelled() }}
