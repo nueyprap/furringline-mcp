@@ -54,7 +54,11 @@ CALL_TIMEOUT_S = 10.0
 RETRIES = 1
 MAX_WORKERS = 4
 MAX_RESPONSE_BYTES = 256 * 1024
-BUDGET_S = {"ci": 180.0, "pre-push": 45.0, "stop": 25.0}
+# stop stays under Claude/Codex Stop hook timeout (30s) so a slow review
+# still returns a handled block instead of being killed with no verdict.
+# Cursor Stop (--cursor) uses CURSOR_STOP_BUDGET_S; pre-push has no outer timeout.
+BUDGET_S = {"ci": 180.0, "pre-push": 180.0, "stop": 25.0}
+CURSOR_STOP_BUDGET_S = 180.0
 MAX_UNTRACKED_FILES = 200
 MAX_UNTRACKED_BYTES = 2_000_000
 CACHE_ENTRIES = 100
@@ -1217,7 +1221,8 @@ def main(argv=None):
 def run(args):
     started = time.monotonic()
     mode = args.mode
-    deadline = started + BUDGET_S[mode]
+    budget = (CURSOR_STOP_BUDGET_S if mode == "stop" and args.cursor else BUDGET_S[mode])
+    deadline = started + budget
     stdin_text = _read_stdin() if mode in ("pre-push", "stop") else ""
     out = sys.stdout if mode == "ci" else sys.stderr   # stop: stdout is for hook JSON only
 

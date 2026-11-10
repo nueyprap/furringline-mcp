@@ -41,6 +41,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import http.client
 import json
 import os
 import platform
@@ -50,6 +51,8 @@ import subprocess
 import sys
 import tarfile
 import tempfile
+import time
+import urllib.error
 import urllib.request
 from pathlib import Path
 
@@ -62,6 +65,29 @@ PIN_SHA256 = {
     "linux_arm64": "3060f7c9f18c70afdc432984cacabdd1e9103729b5d5fee7fb6755a90d1c59d4",
 }
 URL = "https://github.com/trufflesecurity/trufflehog/releases/download/v{v}/trufflehog_{v}_{plat}.tar.gz"
+# Second source when GitHub release downloads fail (504s for 20+ minutes on 2026-11-08 failed every jev check):
+# TruffleHog's own Docker Hub image of the same release. The image layer that holds usr/bin/trufflehog is
+# fetched by digest over plain HTTPS (no docker needed; blob fetches do not count toward Docker Hub's pull
+# limit) and checked against that digest, which fixes every byte of the binary inside. mirror_pins.py (nuey-skills)
+# checks, when it prints the pins, that this binary is byte-identical to the GitHub tarball's (true for 3.99.7). Linux only (CI, cloud sessions);
+# the Macs keep their installed binary. No Actions cache: a cache archive can write anywhere on the runner,
+# so gate workflows stay cache-free (scripts/repo-standard/README.md, checks-from-main).
+MIRROR_REPO = "trufflesecurity/trufflehog"
+MIRROR_TOKEN_URL = "https://auth.docker.io/token?service=registry.docker.io&scope=repository:{repo}:pull"
+MIRROR_BLOB_URL = "https://registry-1.docker.io/v2/{repo}/blobs/{digest}"
+MIRROR_MEMBER = "usr/bin/trufflehog"
+MIRROR_LAYER = {  # per TruffleHog version; print a new entry with scripts/secret-scan/mirror_pins.py (nuey-skills)
+    "3.99.7": {
+        "linux_amd64": "sha256:da63fb77679376e6062134efe8747801ff5fc1d4523698ad716716a11788d803",
+        "linux_arm64": "sha256:1a3d035c57c4ba5e0e9ec0bda46c30e38817ef1ae73bbf3b41d1a42d7b0754e3",
+    },
+}
+RETRY_DELAYS = (3, 10, 20)  # seconds before each retry of a failed download (4 tries)
+TRY_TIMEOUT = 30  # seconds a socket may wait for data (per read, not the whole transfer)
+# Time for each download, tries and transfer included, so a GitHub that hangs or trickles still leaves the Docker
+# Hub fallback its turn inside the 10-minute jev job. Worst case all told: 60 + 30 + 90 = 180 s (plus one socket
+# timeout at most, for a read already waiting when the budget ends).
+BUDGET_RELEASE, BUDGET_TOKEN, BUDGET_LAYER = 60, 30, 90
 ALLOW_FILE = ".jev/secret-scan-allow.json"
 ZERO = "0" * 40
 SCAN_TIMEOUT = 600
@@ -144,10 +170,59 @@ def find_binary():
     return None
 
 
-def download(url, dest, timeout=300):
+class DownloadError(RuntimeError):
+    """A download that failed for network reasons (the next source may work). A checksum mismatch is not one."""
+
+
+def _fetch_once(url, dest, timeout, headers, deadline=None, clock=time.monotonic):
+    """One try. A body shorter than its Content-Length, or a transfer still running at `deadline`, is a failure."""
     req = urllib.request.Request(url, headers={"User-Agent": f"nuey-secret-scan/{PIN_VERSION}"})
+    for key, value in (headers or {}).items():
+        req.add_unredirected_header(key, value)  # never forwarded to the CDN a registry redirects to
     with urllib.request.urlopen(req, timeout=timeout) as resp, open(dest, "wb") as out:  # noqa: S310 (fixed https URL)
-        shutil.copyfileobj(resp, out)
+        want = resp.headers.get("Content-Length") if getattr(resp, "headers", None) else None
+        got = 0
+        while True:
+            if deadline is not None and clock() > deadline:
+                raise TimeoutError("transfer ran past its time budget")
+            # read1: at most one network read, so the deadline is checked at least once per socket timeout
+            # (read(n) would wait for all n bytes from a server that trickles).
+            block = resp.read1(1 << 16)
+            if not block:
+                break
+            out.write(block)
+            got += len(block)
+    if want and want.isdigit() and got != int(want):
+        raise http.client.IncompleteRead(b"", int(want) - got)
+
+
+def download(url, dest, headers=None, timeout=None, delays=None, sleep=time.sleep, budget=None,
+             clock=time.monotonic):
+    """Fetch url into dest, retrying a server error (5xx, 408, 429) or a network failure with backoff.
+
+    No new try starts once `budget` seconds have passed. Raises DownloadError when every try failed or the budget
+    ran out, or at once on a client error such as 404."""
+    delays = RETRY_DELAYS if delays is None else delays
+    timeout = TRY_TIMEOUT if timeout is None else timeout
+    start, last, tries = clock(), "", 0
+    deadline = start + budget if budget is not None else None
+    for attempt in range(len(delays) + 1):
+        if attempt:
+            if budget is not None and clock() - start + delays[attempt - 1] > budget:
+                raise DownloadError(f"{last} after {tries} tries ({budget} s budget) for {url.split('?')[0]}")
+            say(f"download failed ({last}); retrying in {delays[attempt - 1]} s ...")
+            sleep(delays[attempt - 1])
+        tries += 1
+        try:
+            _fetch_once(url, dest, timeout, headers, deadline, clock)
+            return
+        except urllib.error.HTTPError as exc:
+            last = f"HTTP {exc.code}"
+            if exc.code < 500 and exc.code not in (408, 429):
+                raise DownloadError(f"{last} for {url.split('?')[0]}") from None
+        except (urllib.error.URLError, OSError, TimeoutError, http.client.HTTPException) as exc:  # a cut-off body too
+            last = str(getattr(exc, "reason", "") or exc or type(exc).__name__)[:120]
+    raise DownloadError(f"{last} after {tries} tries for {url.split('?')[0]}")
 
 
 def sha256_file(path):
@@ -158,8 +233,54 @@ def sha256_file(path):
     return h.hexdigest()
 
 
+def _binary_from_release(fetch, plat, tmp):
+    """The pinned GitHub release tarball, sha256-checked; returns the unpacked binary's path in tmp."""
+    tarball = os.path.join(tmp, "th.tar.gz")
+    fetch(URL.format(v=PIN_VERSION, plat=plat), tarball, budget=BUDGET_RELEASE)
+    got = sha256_file(tarball)
+    if got != PIN_SHA256[plat]:
+        raise RuntimeError(f"TruffleHog download checksum mismatch for {plat} (got {got[:12]}...); not installed")
+    with tarfile.open(tarball, "r:gz") as tar:
+        member = next((m for m in tar.getmembers() if m.name in ("trufflehog", "./trufflehog")), None)
+        if member is None or not member.isfile():
+            raise RuntimeError("TruffleHog tarball has no trufflehog binary")
+        src = tar.extractfile(member)
+        staged = os.path.join(tmp, "trufflehog")
+        with open(staged, "wb") as out:
+            shutil.copyfileobj(src, out)
+    return staged
+
+
+def _binary_from_mirror(fetch, plat, tmp):
+    """The same binary from TruffleHog's Docker Hub image layer, fetched by pinned digest; both hashes checked."""
+    token_file = os.path.join(tmp, "token.json")
+    fetch(MIRROR_TOKEN_URL.format(repo=MIRROR_REPO), token_file, budget=BUDGET_TOKEN)
+    try:
+        with open(token_file, encoding="utf-8") as fh:
+            token = json.load(fh)["token"]
+    except (OSError, ValueError, KeyError, TypeError):
+        raise DownloadError("Docker Hub gave no pull token") from None
+    digest = MIRROR_LAYER[PIN_VERSION][plat]
+    layer = os.path.join(tmp, "layer.tar.gz")
+    fetch(MIRROR_BLOB_URL.format(repo=MIRROR_REPO, digest=digest), layer, headers={"Authorization": f"Bearer {token}"},
+          budget=BUDGET_LAYER)
+    got = sha256_file(layer)
+    if f"sha256:{got}" != digest:  # fixes every byte of the binary inside
+        raise RuntimeError(f"Docker Hub layer checksum mismatch for {plat} (got {got[:12]}...); not installed")
+    with tarfile.open(layer, "r:*") as tar:
+        member = next((m for m in tar if m.name.lstrip("./") == MIRROR_MEMBER), None)
+        if member is None or not member.isfile():
+            raise RuntimeError(f"Docker Hub layer has no {MIRROR_MEMBER}")
+        staged = os.path.join(tmp, "trufflehog")
+        with open(staged, "wb") as out:
+            shutil.copyfileobj(tar.extractfile(member), out)
+    return staged
+
+
 def install_binary(fetch=download):
-    """Download the pinned release, check its sha256, unpack only `trufflehog`. Returns the path."""
+    """Install the pinned TruffleHog: the GitHub release (sha256-checked), or, when that download fails on a
+    platform with a pinned mirror layer, the same binary from Docker Hub. Unpacks only `trufflehog`; a
+    checksum mismatch never falls back. Raises when no verified binary could be had. Returns the path."""
     plat = platform_key()
     if not plat:
         raise RuntimeError(f"no pinned TruffleHog build for {platform.system()} {platform.machine()}")
@@ -167,19 +288,17 @@ def install_binary(fetch=download):
     target = target_dir / "trufflehog"
     target_dir.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(dir=str(target_dir.parent), prefix=".dl-") as tmp:
-        tarball = os.path.join(tmp, "th.tar.gz")
-        fetch(URL.format(v=PIN_VERSION, plat=plat), tarball)
-        got = sha256_file(tarball)
-        if got != PIN_SHA256[plat]:
-            raise RuntimeError(f"TruffleHog download checksum mismatch for {plat} (got {got[:12]}...); not installed")
-        with tarfile.open(tarball, "r:gz") as tar:
-            member = next((m for m in tar.getmembers() if m.name in ("trufflehog", "./trufflehog")), None)
-            if member is None or not member.isfile():
-                raise RuntimeError("TruffleHog tarball has no trufflehog binary")
-            src = tar.extractfile(member)
-            staged = os.path.join(tmp, "trufflehog")
-            with open(staged, "wb") as out:
-                shutil.copyfileobj(src, out)
+        try:
+            staged = _binary_from_release(fetch, plat, tmp)
+        except DownloadError as exc:
+            if plat not in MIRROR_LAYER.get(PIN_VERSION, {}):  # pins for another version never apply
+                raise
+            say(f"GitHub release download failed ({exc}); trying TruffleHog's Docker Hub copy of the same build ...")
+            try:
+                staged = _binary_from_mirror(fetch, plat, tmp)
+            except DownloadError as exc2:
+                raise DownloadError(f"GitHub release: {exc}; Docker Hub: {exc2}") from None
+            say(f"installed TruffleHog {PIN_VERSION} from Docker Hub (layer sha256 checked against the pin).")
         os.chmod(staged, 0o755)
         target_dir.mkdir(parents=True, exist_ok=True)
         os.replace(staged, target)
