@@ -17,7 +17,7 @@ a copy in .jev/jev_gate.py that install.py keeps up to date.
 """
 from __future__ import annotations
 
-VERSION = "0.1.8"
+VERSION = "0.1.9"
 
 import argparse
 import concurrent.futures
@@ -62,6 +62,7 @@ CURSOR_STOP_BUDGET_S = 180.0
 MAX_UNTRACKED_FILES = 200
 MAX_UNTRACKED_BYTES = 2_000_000
 CACHE_ENTRIES = 100
+REPEAT_TTL_S = 6 * 3600   # a repeated identical refusal within this window is one line
 
 LOCKFILES = {"pnpm-lock.yaml", "package-lock.json", "yarn.lock", "poetry.lock", "uv.lock", "Cargo.lock"}
 MINIFIED_SUFFIXES = (".min.js", ".min.mjs", ".min.cjs", ".min.css")
@@ -1086,6 +1087,39 @@ def failing_reason(rec):
             ". Fix it, or add a 'Jev-Override: <reason>' trailer if Jev is wrong.")
 
 
+REPEAT_LINE = ("Jev: same refusal as before for this unchanged change ({reason}); change the diff or add a "
+               "Jev-Override with a reason before retrying.")
+
+
+def short_reason(rec):
+    """The failing checks in a few words, for the one-line repeat."""
+    parts = [f"{c['id']} {c['p']:.2f}" for c in rec["checks"] if c["status"] == "fail"]
+    parts += [f"possible {h['kind']} in {h['file']}:{h['line']}" for h in rec["regex_hits"]]
+    return ", ".join(parts)
+
+
+def repeated_refusal(repo, label, diff_text, rec, now=None):
+    """True when this exact refusal was already printed in full for this unchanged diff.
+
+    Remembered in the local result cache file (never in CI). The key is the mode, the repo, the
+    diff's hash and which checks failed, so a changed diff, another mode or another failure
+    still gets the full report. Only the printed text changes; the block decision does not."""
+    path = cache_path(repo)
+    if not path:
+        return False
+    signature = sorted([c["id"] for c in rec["checks"] if c["status"] == "fail"] +
+                       [f"{h['kind']}@{h['file']}:{h['line']}" for h in rec["regex_hits"]])
+    key = "refusal:" + hashlib.sha256(json.dumps(
+        [VERSION, label, rec.get("repo", ""), hashlib.sha256(diff_text.encode("utf-8")).hexdigest(),
+         signature]).encode("utf-8")).hexdigest()
+    now = time.time() if now is None else now
+    told = _cache_load(path).get(key)
+    if isinstance(told, dict) and isinstance(told.get("time"), (int, float)) and now - told["time"] < REPEAT_TTL_S:
+        return True
+    _cache_store(path, key, {"time": int(now)})
+    return False
+
+
 def github_outputs(rec):
     for h in rec["regex_hits"]:
         print(f"::error file={h['file']},line={h['line']},title=Jev gate::Possible {h['kind']} added")
@@ -1310,17 +1344,25 @@ def run(args):
     rec["review_enforcement"] = ("blocked" if blocked else "not-applicable" if rec["jev_status"] == "empty" else
                                  "released-repeat-stop" if loop_release else
                                  "satisfied" if args.require_model or args.require_review else "not-required")
+    # A retry of the same unchanged change that fails the same checks: say it in one line (local
+    # modes only; CI always prints the full report, since nobody saw the earlier one).
+    repeat = (blocked and real_fail and not replacement and not model_required and mode != "ci"
+              and os.environ.get("GITHUB_ACTIONS") != "true"
+              and repeated_refusal(repo, mode + ("/cursor" if args.cursor else ""), diff, rec))
+    rec["repeat_refusal"] = bool(repeat)
     if not network_secret:  # the health record lives on the Macs
         record_model_health(rec, repo)
     write_log(rec, mode)
     if model_required and not loop_release and not setup_block:
         print("jev-gate: fresh complete model evaluation required; readiness not verified.", file=out)
 
+    repeat_line = REPEAT_LINE.format(reason=short_reason(rec)) if repeat else ""
     if mode == "stop":
-        if (rec["verdict"] != "pass" or rec["jev_status"] == "unavailable") and not loop_release:
+        if (rec["verdict"] != "pass" or rec["jev_status"] == "unavailable") and not loop_release and not repeat:
             print(human_report(rec, full=False), file=sys.stderr)
         if blocked:
-            reason = (setup_msg if setup_block and not real_fail and credential_source == KEYCHAIN_LOCKED else
+            reason = (repeat_line if repeat else
+                      setup_msg if setup_block and not real_fail and credential_source == KEYCHAIN_LOCKED else
                       setup_msg + STOP_ALERT if setup_block and not real_fail else
                       "TypeSafe credential replacement is required; Jev review is incomplete."
                       if replacement else
@@ -1332,7 +1374,7 @@ def run(args):
             print("{}")
         return 0
 
-    print(human_report(rec, full=(mode == "ci")), file=out)
+    print(repeat_line or human_report(rec, full=(mode == "ci")), file=out)
     if blocked and setup_msg:
         print(setup_msg, file=out)  # last line: where the key is missing and the fix
     if mode == "ci":
