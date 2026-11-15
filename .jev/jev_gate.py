@@ -17,7 +17,7 @@ a copy in .jev/jev_gate.py that install.py keeps up to date.
 """
 from __future__ import annotations
 
-VERSION = "0.1.9"
+VERSION = "0.1.10"
 
 import argparse
 import concurrent.futures
@@ -184,20 +184,6 @@ QUESTIONS = {
                       "four digits) do not count."),
         },
     },
-    "app_code": {
-        "meaning": "adds application code, which belongs in its own product repository",
-        "fix": "move application code to its product repository and keep only docs or small agent scripts here",
-        "instructions": (
-            "This repository is for knowledge documents (Markdown notes, workflows, rules) and small "
-            "helper scripts and tooling for AI agents, not for application code. " + DIFF_HOW_TO_READ +
-            "Do the added lines add application code, such as a web app, a server, an API service or a "
-            "product feature?"),
-        "criteria": {
-            "true": "The change adds application or product code that belongs in its own code repository.",
-            "false": ("The change adds or edits documents, configuration, tests, or helper scripts and "
-                      "tooling for agents (such as hooks, checks, installers or setup scripts)."),
-        },
-    },
     "rewrites_history": {
         "meaning": "rewrites or deletes existing passages instead of adding dated notes",
         "fix": "keep earlier passages and add new material as dated notes",
@@ -218,7 +204,9 @@ QUESTIONS = {
 PROFILES = {
     "code": [("secret_added", "block"), ("task_unmet", "block"), ("breaks_rule", "block"),
              ("missing_test", "warn"), ("sensitive_area", "warn"), ("debug_leftover", "warn")],
-    "knowledge": [("secret_added", "block"), ("private_data", "block"), ("app_code", "block"),
+    "knowledge": [("secret_added", "block"), ("private_data", "block"),
+                  # app_code removed 2026-11-15: where new code belongs is decided by
+                  # nuey-skills scripts/code-homes/homes.json at commit and in CI, not by Jev on every run.
                   ("rewrites_history", "warn"), ("breaks_rule", "warn")],
 }
 TASK_QUESTION = "task_unmet"   # asked once per run, not once per chunk
