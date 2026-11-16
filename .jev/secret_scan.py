@@ -749,6 +749,43 @@ def advice(failing, staged=False):
         "in nuey-skills. Never --no-verify.")
 
 
+LIVE_TOOL = "secret-scan-live"
+
+
+def repo_name(repo):
+    """The repository's name from its origin URL (else its folder name); used only in a message and a job title."""
+    try:
+        url = subprocess.run(["git", "-C", str(repo), "remote", "get-url", "origin"], capture_output=True,
+                             text=True, timeout=10).stdout.strip()
+    except (OSError, subprocess.SubprocessError):
+        url = ""
+    name = url.rstrip("/").rsplit("/", 1)[-1] if url else Path(repo).name
+    return name[:-4] if name.endswith(".git") else name
+
+
+def hand_off_live(failing, repo, mode):
+    """A LIVE (verified) key opens one rotation job and sends one iMessage (record security-13ee2b part D) through
+    this machine's secret-scan-live tool (nuey-skills scripts/secret-scan/live_key.py). Only the safe fields go to
+    it. Nothing happens where the tool is not installed (a CI runner, a repo's own clone elsewhere); it never
+    changes the scan's result."""
+    live = [{k: f[k] for k in ("detector", "status", "file", "line", "commit", "fingerprint")}
+            for f in failing if f["status"] == "verified"]
+    if not live or os.environ.get("GITHUB_ACTIONS") == "true":
+        return
+    tool = shutil.which(LIVE_TOOL) or str(Path.home() / ".local/bin" / LIVE_TOOL)
+    if not os.access(tool, os.X_OK):
+        return
+    payload = {"repo": repo_name(repo), "path": str(repo), "mode": mode, "findings": live}
+    try:
+        r = subprocess.run([tool], input=json.dumps(payload), text=True, capture_output=True, timeout=300)
+        if r.returncode == 0:
+            say("a live key opens one rotation job and one iMessage (secret-scan-live --list shows them).")
+        else:
+            say(f"secret-scan-live failed (exit {r.returncode}); rotate the key now and tell Narathip.")
+    except (OSError, subprocess.SubprocessError) as exc:
+        say(f"could not open the rotation job ({type(exc).__name__}); the next scan that finds it tries again.")
+
+
 # --------------------------------------------------------------------------- modes
 
 
@@ -825,6 +862,8 @@ def main(argv=None):
     if failing:
         say(f"{len(failing)} secret finding(s); refused.")
         advice(failing, staged=args.staged)
+        mode = "staged" if args.staged else "pre-push" if args.pre_push else "full" if args.full else "ci"
+        hand_off_live(failing, repo, mode)
         return 1
     if args.staged:
         return 0  # a clean commit stays quiet

@@ -17,7 +17,7 @@ a copy in .jev/jev_gate.py that install.py keeps up to date.
 """
 from __future__ import annotations
 
-VERSION = "0.1.10"
+VERSION = "0.1.11"
 
 import argparse
 import concurrent.futures
@@ -27,6 +27,7 @@ import hmac
 import json
 import os
 import re
+import stat
 import subprocess
 import sys
 import time
@@ -631,6 +632,11 @@ def key_setup_message(credential_source, failure_kind):
         return ("jev-gate: Jev key rejected on this Mac: save the new key in 1Password, then run "
                 "jev-key update-all." if rejected else
                 "jev-gate: Jev key missing in this Mac's Keychain: run jev-key refresh.")
+    if credential_source in LINUX_FILE_SOURCES:
+        return ("jev-gate: Jev key rejected on this machine: save the new key in 1Password, then run "
+                "jev-key update-all on the MacBook (or jev-key refresh --owner <you> here)." if rejected else
+                "jev-gate: Jev key file ~/.config/jev-key/credential is missing, unreadable or not mode 600 on "
+                "this machine: run jev-key refresh --owner <you> (typesafe-local-access skill).")
     return ("jev-gate: Jev key rejected in this environment: replace TYPESAFE_API_KEY in its secrets "
             "settings." if rejected else
             "jev-gate: Jev key missing in this environment: add TYPESAFE_API_KEY to its secrets settings "
@@ -667,9 +673,50 @@ def keychain_key():
     return ""
 
 
+# Linux local copy (2026-11-16, the Dell XPS 13): one line, the key only, mode 600, written by
+# jev-key from 1Password. Where jev-key is installed, the legacy ~/.config/typesafe/.env is never read.
+LINUX_KEY_FILE = ".config/jev-key/credential"
+LINUX_FILE_SOURCES = ("linux-file", "linux-file-missing", "linux-file-unsafe", "linux-file-invalid")
+
+
+def linux_file_key():
+    """(key, source) from the Linux key file kept by jev-key, or ("", None) when this machine has no
+    jev-key (cloud sessions, Hermes Cloud: they keep the environment and legacy-file route).
+
+    A missing file is healed once with `jev-key heal`. A file that is not ours, not a plain file, or
+    readable by group or others is refused, never read. Never printed."""
+    if os.environ.get("TYPESAFE_KEYCHAIN", "on") == "off" or sys.platform == "darwin":
+        return "", None
+    path = Path.home() / LINUX_KEY_FILE
+    helper = Path.home() / ".local/bin/jev-key"
+    for attempt in (0, 1):
+        try:
+            st = os.lstat(path)
+        except OSError:
+            st = None
+        if st is not None:
+            break
+        if not os.access(helper, os.X_OK):
+            return "", None
+        if attempt:
+            return "", "linux-file-missing"
+        try:
+            subprocess.run([str(helper), "heal"], capture_output=True, timeout=60)
+        except (OSError, subprocess.TimeoutExpired):
+            return "", "linux-file-missing"
+    if not stat.S_ISREG(st.st_mode) or st.st_uid != os.getuid() or st.st_mode & 0o077:
+        return "", "linux-file-unsafe"
+    try:
+        key = path.read_text(encoding="utf-8").strip()
+    except (OSError, UnicodeError):
+        return "", "linux-file-invalid"
+    return (key, "linux-file") if valid_key(key) else ("", "linux-file-invalid")
+
+
 def load_credential():
     """Environment wins, including explicit invalid/empty values; no silent fallback.
-    Then the Keychain copy (jev-key); then the legacy file unless marked revoked."""
+    Then the Keychain copy (jev-key, Mac) or the key file (jev-key, Linux); then the legacy
+    file unless marked revoked, only where jev-key is not installed."""
     policy = os.environ.get("TYPESAFE_KEY_SOURCE", "auto")
     if policy not in ("auto", "environment"):
         return "", "invalid-policy"
@@ -683,6 +730,9 @@ def load_credential():
         return key, "keychain"
     if KEYCHAIN_STATE["locked"]:
         return "", KEYCHAIN_LOCKED  # never fall through to the revoked file and call it "rejected"
+    key, source = linux_file_key()
+    if source:
+        return key, source
     if (Path.home() / ".config/typesafe/legacy-source-revoked.json").exists():
         return "", "revoked-legacy-file"
     env_file = Path.home() / ".config/typesafe/.env"
@@ -1028,8 +1078,10 @@ def _fmt_p(p):
     return "  -  " if p is None else f"{p:.2f}"
 
 
-def human_report(rec, full=True):
-    """Verdict first, then each question. full=False lists only questions that flagged."""
+def human_report(rec, full=True, hints=None):
+    """Verdict first, then each question. full=False lists only questions that flagged. A failing check also
+    gets its fix line (with this repo's fix_hints), so commit, push and CI refusals say what to do too."""
+    hints = hints or {}
     head = f"Jev gate: {rec['verdict'].upper()}"
     if rec.get("review_status") == "incomplete":
         head = f"Jev gate: INCOMPLETE (available checks: {rec['verdict'].upper()})"
@@ -1055,6 +1107,8 @@ def human_report(rec, full=True):
             continue
         label = {"fail": "FAIL", "warn": "warn", "ok": "ok", "not asked": "-"}[c["status"]]
         lines.append(f"  {label:<5} {c['id']:<17} {_fmt_p(c['p'])}  {c['meaning']}")
+        if c["status"] == "fail" and c["id"] in QUESTIONS:
+            lines.append("        fix: " + QUESTIONS[c["id"]]["fix"] + (f"; {hints[c['id']]}" if c["id"] in hints else ""))
     for h in rec["regex_hits"]:
         lines.append(f"  FAIL  regex secret scan   {h['file']}:{h['line']} looks like a {h['kind']} ({h['hint']})")
     if rec.get("unchecked_chunks"):
@@ -1062,17 +1116,33 @@ def human_report(rec, full=True):
     if rec.get("truncated_files"):
         lines.append(f"  Note: diff too large; {rec['truncated_files']} file(s) were only partly reviewed.")
     if rec["verdict"] == "fail" and not rec.get("overridden"):
-        lines.append("  If Jev is wrong, add a trailer line 'Jev-Override: <reason>' to a commit in this change.")
+        lines.append("  If Jev misread the change, add a trailer line 'Jev-Override: <reason>' to a commit in this change "
+                     "(never to keep files that belong somewhere else).")
     return "\n".join(lines)
 
 
-def failing_reason(rec):
-    parts = [f"{c['id']} {c['p']:.2f} ({c['meaning']}: {QUESTIONS[c['id']]['fix']})"
+def fix_hints(repo):
+    """Per-repo fix pointers from `fix_hints` in .jev/config.json ({question id: text}), so a refusal names the
+    exact place to move things to in this repo (2026-11-15: Cursor's app_code refusal said "its product
+    repository" without saying which one, and the agent overrode instead of moving the files)."""
+    try:
+        data = json.loads((Path(repo) / ".jev/config.json").read_text(encoding="utf-8"))
+        hints = data.get("fix_hints") or {}
+        return {k: str(v) for k, v in hints.items() if isinstance(v, str)} if isinstance(hints, dict) else {}
+    except (OSError, ValueError, AttributeError):
+        return {}
+
+
+def failing_reason(rec, hints=None):
+    hints = hints or {}
+    parts = [f"{c['id']} {c['p']:.2f} ({c['meaning']}: {QUESTIONS[c['id']]['fix']}"
+             + (f"; {hints[c['id']]}" if c['id'] in hints else "") + ")"
              for c in rec["checks"] if c["status"] == "fail"]
     parts += [f"possible {h['kind']} in {h['file']}:{h['line']} (remove the secret value)"
               for h in rec["regex_hits"]]
     return ("Jev gate: " + "; ".join(parts) +
-            ". Fix it, or add a 'Jev-Override: <reason>' trailer if Jev is wrong.")
+            ". Fix it, or add a 'Jev-Override: <reason>' trailer only if Jev misread the change "
+            "(never to keep files that belong somewhere else).")
 
 
 REPEAT_LINE = ("Jev: same refusal as before for this unchanged change ({reason}); change the diff or add a "
@@ -1347,7 +1417,7 @@ def run(args):
     repeat_line = REPEAT_LINE.format(reason=short_reason(rec)) if repeat else ""
     if mode == "stop":
         if (rec["verdict"] != "pass" or rec["jev_status"] == "unavailable") and not loop_release and not repeat:
-            print(human_report(rec, full=False), file=sys.stderr)
+            print(human_report(rec, full=False, hints=fix_hints(repo)), file=sys.stderr)
         if blocked:
             reason = (repeat_line if repeat else
                       setup_msg if setup_block and not real_fail and credential_source == KEYCHAIN_LOCKED else
@@ -1355,14 +1425,14 @@ def run(args):
                       "TypeSafe credential replacement is required; Jev review is incomplete."
                       if replacement else
                       "Fresh complete Jev evaluation required; readiness not verified."
-                      if model_required else failing_reason(rec))
+                      if model_required else failing_reason(rec, fix_hints(repo)))
             print(json.dumps({"followup_message": reason} if args.cursor else
                              {"decision": "block", "reason": reason}))
         else:
             print("{}")
         return 0
 
-    print(repeat_line or human_report(rec, full=(mode == "ci")), file=out)
+    print(repeat_line or human_report(rec, full=(mode == "ci"), hints=fix_hints(repo)), file=out)
     if blocked and setup_msg:
         print(setup_msg, file=out)  # last line: where the key is missing and the fix
     if mode == "ci":
