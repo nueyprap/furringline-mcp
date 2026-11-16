@@ -40,6 +40,16 @@ jobs:
           BASE_REF: ${{ github.base_ref }}
         run: python3 .jev/plan_login_check.py --base "origin/$BASE_REF" --github
 
+      # Plain text, no model (Narathip, 2026-11-16): a key written to a file is also saved to 1Password. Fails on
+      # lines this pull request adds that write a token, secret or key file in a file that never calls the shared
+      # save step, op-<agent> save or key_save.save (scripts/key-save in nuey-skills). Runs even when the Jev step
+      # fails. A pure cache write carries a key-save marker with its reason (scripts/key-save/README.md).
+      - name: Key save check
+        if: ${{ !cancelled() }}
+        env:
+          BASE_REF: ${{ github.base_ref }}
+        run: python3 .jev/key_save_check.py --base "origin/$BASE_REF" --github
+
       # TruffleHog OSS (Narathip, 2026-11-01): fails on a live (verified) or unconfirmed (unknown) secret in the
       # commits this pull request adds. Pinned version, sha256-checked download, retried, then TruffleHog's Docker
       # Hub layer of the same binary (hash-pinned) when GitHub release downloads are down; no verified binary
