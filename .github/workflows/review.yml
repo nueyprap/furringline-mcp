@@ -86,7 +86,8 @@ jobs:
           the default branch.
         - Two checks always cover the whole pull request, because they change between rounds: question 1 against
           the description as it is now (pr.md; it may have been edited since), and question 4 for every test file
-          the newest commits add or change: is it real, and does the `ci` workflow actually run it?
+          the newest commits add or change: is it real, and does the `ci` workflow actually run it? Question 11
+          (the `proof` field) also covers the whole pull request, against its Proof lines as they are now.
         - An earlier verdict is not a reason by itself: pass or fail on what the pull request does now.
       REVIEW_PROMPT: |
         You are the second reviewer for a pull request in ${{ github.repository }}. Another agent
@@ -152,11 +153,42 @@ jobs:
            token, builds a header from it, or calls an Anthropic or claude.ai endpoint with it is a
            real problem: kind "rule-broken"; the fix is to hand the login to the `claude` program
            (for a meter, `claude -p --output-format stream-json --verbose`) or use an API key.
+        9. Does the diff add a LESSONS.md row (nuey-skills), or change a row's Status? A new row names its check
+           (2026-11-15): `Check:` or `Enforced →` a code file, `Promoted →` a code file, or `Not code: <why>`.
+           Judge only that claim, against the lesson file the row links. A check file that would not fail,
+           block or warn when the lesson's mistake happens again, or a `Not code:` reason that is false because
+           a fixed pattern a hook, lint or test could match would catch the mistake (code the lesson names may
+           already do it), is a real problem: kind "rule-broken"; the fix is to name or build the real check.
+           A `Not code:` on a judgment call, a one-off or a tool with no hook is true. `Promoted →` a skill or
+           doc is the rule's home, not a check claim: pass it. The lesson's wording, area, type and date, and
+           rows the diff does not touch, are never a problem.
+        10. Does the description or a commit message carry a `Run-Now-Skip: <row>: <reason>` or
+            `Run-Now-None: <reason>` line? Run-Now-Skip lands a changed scheduled job (a row in
+            scripts/watcher/register.json) without the run-now proof that it ran once now; Run-Now-None
+            lands a change to a job whose row has no run_now block. Accept one only for an honest case
+            it states: the row installs from another repo than this PR's, its only Mac is off or
+            unreachable, its real run disturbs a Mac and both Macs are in use, or (Run-Now-None) the
+            job truly cannot be run by a robot. Check the reason against the diff: "checked by hand",
+            "tests pass", "small change" or a reason the diff contradicts is a real problem: kind
+            "rule-broken"; the fix is to run `python3 scripts/jobq/run_now.py now --id <row>` from the
+            branch (agent-merge then adds its Run-Now-Proof line), or state the honest case.
+        11. Proof (2026-11-16). Read the `Proof:` lines in pr.md (agent-merge adds them from `--proof` and from
+            commit messages; Run-Now-Proof lines are question 10, not this). A proof is a test that failed before
+            the fix and passes after, or a real run of the app or command and what was seen. List the behaviour
+            changes in the diff (not docs, comments or renames) and, for each, say whether a proof covers it. Put
+            that in the `proof` field: what the proof covers, the changes it does not cover (name the function,
+            command or file), or "no Proof line". A missing or partial proof is never a problem by itself and never
+            a reason to fail: it only goes in that field. It counts toward the verdict only when a Proof line claims
+            something the diff contradicts: the named test does not exist in the branch, cannot fail, or does not
+            touch the change it claims to prove (kind "fake-tests"), or the claimed result cannot be true of this
+            code (kind "does-not-match-description").
 
         verdict "fail" only for a real problem: a bug, a risk from question 3, fake tests, a broken
         rule, a change lost in a merge (question 6; leftover conflict markers always fail), new
         data with no backup (question 7), a plan-login-ok marker on a line that sends the login
-        (question 8), or a change that does not do what it claims. Style,
+        (question 8), a false lesson check claim (question 9), a run-now skip with no honest reason
+        (question 10), a Proof line the diff contradicts (question 11), or a change that does not do what it
+        claims. A missing or partial proof (question 11) is not a failure. Style,
         naming, small refactors and "could be nicer" are not failures: put them in notes. When unsure whether something is real, read
         more code before deciding. Each problem needs the file, the line when you can, what is wrong
         in one or two plain sentences, and the exact fix the author agent should make.
@@ -165,12 +197,17 @@ jobs:
         contradicts another rule, a rule lost or weakened by accident, a wrong path or command, or a secret.
         Wording, style and length go in notes.
         Write plain, short English. Your final answer is the structured output only.
+        A concrete bug in the changed code is a problem, never a note, even when the fix is one line: a crash
+        or exception, a wrong value returned, a condition that is always true or always false, data deleted or
+        changed wrongly, a security check that can be got around, or a race between concurrent requests. Notes
+        are only for style, clarity and could-be-nicer. On a re-review this holds for the newest commits;
+        code an earlier round already read follows the re-review rules.
       REVIEW_ARGS: |
         --model opus
         --max-turns 60
         --allowedTools "Read,Grep,Glob,Bash(git diff:*),Bash(git log:*),Bash(git show:*)"
         --disallowedTools "Edit,Write,NotebookEdit,WebFetch,WebSearch"
-        --json-schema '{"type":"object","additionalProperties":false,"required":["verdict","summary","problems","notes"],"properties":{"verdict":{"type":"string","enum":["pass","fail"]},"summary":{"type":"string","description":"One to three plain sentences: what the PR does and your overall judgement."},"problems":{"type":"array","description":"Real problems only; empty when verdict is pass.","items":{"type":"object","additionalProperties":false,"required":["kind","file","what","fix"],"properties":{"kind":{"type":"string","enum":["does-not-match-description","unintended-behaviour","security","data-loss","money","sending","sign-in","fake-tests","rule-broken","bug","lost-change","no-backup"]},"file":{"type":"string"},"line":{"type":"integer"},"what":{"type":"string"},"fix":{"type":"string"}}}},"notes":{"type":"array","description":"Optional non-blocking remarks, at most 5.","items":{"type":"string"}}}}'
+        --json-schema '{"type":"object","additionalProperties":false,"required":["verdict","summary","proof","problems","notes"],"properties":{"verdict":{"type":"string","enum":["pass","fail"]},"summary":{"type":"string","description":"One to three plain sentences: what the PR does and your overall judgement."},"proof":{"type":"string","description":"Question 11, one or two plain sentences: which changes the Proof lines cover, which behaviour changes they do not (by name), or no Proof line."},"problems":{"type":"array","description":"Real problems only; empty when verdict is pass.","items":{"type":"object","additionalProperties":false,"required":["kind","file","what","fix"],"properties":{"kind":{"type":"string","enum":["does-not-match-description","unintended-behaviour","security","data-loss","money","sending","sign-in","fake-tests","rule-broken","bug","lost-change","no-backup"]},"file":{"type":"string"},"line":{"type":"integer"},"what":{"type":"string"},"fix":{"type":"string"}}}},"notes":{"type":"array","description":"Optional non-blocking remarks, at most 5.","items":{"type":"string"}}}}'
       RULE_PROMPT: |
         You are the rule reviewer. This change adds or edits an agent rule: an instruction file (AGENTS.md, CLAUDE.md,
         APPROVAL_RULES.md and the like), a skill definition (SKILL.md), or hook or check code that can stop an agent. Several
@@ -273,6 +310,30 @@ jobs:
         are normal edits: pass them. When unsure whether a problem is real or likely, read more before deciding; if it is
         still only a guess, put it in notes, not in problems.
 
+        Rule intake (2026-11-05). When the PR body or a commit carries a `Rule-Intake: <home>: <what>` line (a CI gate
+        asks for it on every change to instruction text; .agents/skills/rule-intake/SKILL.md on main), check it
+        against the diff; the home is gate, workflow step, skill, map line, delete or not a rule. One case is always a
+        problem (kind "other"), even when the rule itself is harmless: a `not a rule` or `delete` line on a change that adds
+        a new duty, ban or step for agents (a new "always", "never", "only", "must", "do not" or "is not done until" that
+        was not on the base). It meets the bar because the line is what passes the rule-intake gate (c: a check passed by
+        typing a claim), and false lines are how new rules would skip rule intake. The fix is a true line: name the home. A
+        pointer, a fact, a log entry, an eval tag, the repair of a broken line, or a rewording that keeps the same duty is
+        truly not a rule: pass it. When the line names one home and another of gate, workflow step, skill or map line
+        would fit better, that is a note, never a problem.
+
+        A rule home (gate, workflow step, skill or map line) also carries `Check: <file>` or `Not code: <why>` (2026-11-15).
+        Judge it the same way, kind "other": a `Check:` file that does not enforce the new rule in the diff (it would not
+        fail, block or warn when the rule is broken), or a `Not code:` reason that is false because a fixed pattern a hook,
+        lint or test could match would catch the mistake, is a problem; the fix is to build or name the real check. A
+        `Not code:` on a judgment call, a one-off or a tool with no hook is true: pass it.
+
+        Code homes (2026-11-15). A `scripts/code-homes/homes.json` change needs a `Code-Homes:` commit line whose reason
+        fits the diff when it changes, removes or reorders an existing entry's pattern or home, inserts a "here" entry among
+        existing ones, adds a "here" pattern with fewer than two folder levels before its first `*`
+        (an exact file path is never broad), or drops a code extension; without one it is a
+        problem (kind "other"). Added extensions, elsewhere entries (anywhere) and why/source text edits are free
+        (scripts/code-homes/README.md, "Loosening needs review").
+
         Write plain, short English. Your final answer is the structured output only.
       RULE_ARGS: |
         --model opus
@@ -365,7 +426,7 @@ jobs:
 
           RULE_NAMES = ("AGENTS.md", "CLAUDE.md", "APPROVAL_RULES.md", "MULTI_AGENT_WORKFLOW.md", "SOUL.md", "GEMINI.md",
                         ".cursorrules")
-          RULE_GLOBS = (".agents/skills/*/SKILL.md", ".claude/skills/*/SKILL.md", "skills/*/SKILL.md", ".cursor/rules/*",
+          RULE_GLOBS = (".agents/skills/*/SKILL.md", ".claude/skills/*/SKILL.md", "skills/**/SKILL.md", ".cursor/rules/*",
                         ".githooks/*", ".claude/settings.json", ".codex/hooks.json", ".cursor/hooks.json", "hooks/hooks.json")
           # Code that can stop an agent: a Claude Code / Codex / Cursor hook answer that blocks or denies.
           HOOK_MARK = _re.compile(r"""["']decision["']\s*:\s*["']block["']|permissionDecision|hookSpecificOutput""")
@@ -458,6 +519,16 @@ jobs:
               if len(patch) > limit:
                   patch = patch[:limit] + "\n... cut: run `git log -p` on the commits above for the rest\n"
               return {"previous.md": "".join(parts), "newest.patch": patch}
+          # Rule intake (2026-11-05): the Rule-Intake lines in a PR's commits go into pr.md, so the rule review sees a line
+          # that sits only in a commit message (the gate's fix hint puts it there; agent-merge writes its own PR body).
+          _INTAKE_LINE = _re.compile(r"^[ \t]*(?:>[ \t]*)*(?:[-*][ \t]+)?(?:\*\*|__)?(?:Rule[- ]Intake\b|Check(?:\*\*|__)?[ \t]*:|Not[- ]code\b).*$",
+                                    _re.I | _re.M)  # with the Check: / Not code: lines a rule home needs (2026-11-15)
+
+
+          def intake_note(log_text):
+              """A pr.md section with every Rule-Intake line in the commit messages ('' when there is none)."""
+              lines = list(dict.fromkeys(m.group(0).strip() for m in _INTAKE_LINE.finditer(log_text or "")))
+              return ("\n## Rule-Intake lines in this PR's commits\n\n" + "".join(f"- {ln}\n" for ln in lines)) if lines else ""
           # --- rule files: end ---
 
           # --- after ci: start (scripts/second-reviewer/eval_after_ci.py replays real PRs through this same block) ---
@@ -674,7 +745,8 @@ jobs:
               info = json.loads(sh("gh", "pr", "view", pr, "-R", os.environ["REPO"], "--json", "title,body", check=False) or "{}")
               title, body = info.get("title", ""), info.get("body", "") or ""
           with open(".second-review/pr.md", "w") as f:
-              f.write(f"# PR #{pr or '?'}: {title}\n\n{body}\n")
+              f.write(f"# PR #{pr or '?'}: {title}\n\n{body}\n"
+                      + intake_note(sh("git", "log", "--no-merges", "--format=%B", f"{mb}..{HEAD}", check=False)))
           with open(".second-review/files.txt", "w") as f:
               f.write("\n".join(files) + "\n")
           with open(".second-review/diff.patch", "w") as f:
@@ -1272,6 +1344,8 @@ jobs:
                   return "fail", [f"**Could not review:** {why}. Re-run this job (it may be a plan "
                                   f"usage limit or an outage). Log: {env['RUN_URL']}"]
               lines = [out.get("summary", "").strip()]
+              if (out.get("proof") or "").strip():  # question 11: what the PR's Proof lines cover (not a gate)
+                  lines.append(f"\nProof coverage: {out['proof'].strip()}")
               for i, p in enumerate(out.get("problems") or [], 1):
                   where = p.get("file", "") + (f":{p['line']}" if p.get("line") else "")
                   lines.append(f"\n{i}. **{p.get('kind')}** `{where}`: {p.get('what')}"
