@@ -34,6 +34,11 @@ from the index (the version being committed), the push and CI scans from the com
 download runs) into a private temp folder and runs `trufflehog filesystem` on it: `trufflehog git` has
 no staged option. The temp folder is removed afterwards.
 
+Every scan also runs our own check for the exact shapes of GitHub's tokens (GITHUB_TOKEN_PATTERN, 2026-11-17):
+TruffleHog drops a GitHub token whose text holds an English word, so a token it did not report goes back to
+TruffleHog alone with its word filter off (filtered_unverified), so its live check decides; no answer is unknown and
+fails. key-guard reads the same pattern from this file (one list).
+
 Exit 0 clean (or nothing to scan), 1 a finding, 2 the scan could not run (the caller refuses).
 Standard library only; Python 3.9+.
 """
@@ -43,6 +48,7 @@ import argparse
 import hashlib
 import http.client
 import json
+import math
 import os
 import platform
 import re
@@ -391,8 +397,9 @@ def parse_findings(stdout, base_dir=None, all_results=False):
     """Safe finding dicts from TruffleHog JSON lines. The raw value is used only for the fingerprint.
 
     Status: verified (live), unknown (the live check failed, VerificationError) or unverified (the provider
-    says it is not live). git mode asks only for verified and unknown, so there anything not verified is
-    unknown; the commit scan asks for all three (all_results). base_dir: filesystem mode's scanned folder, cut from each file path (staged files are copied there)."""
+    says it is not live). Both scans ask for all three (all_results), so the GitHub shape check knows every
+    token TruffleHog judged; the push and CI scans then drop the unverified ones (with_shape_hits).
+    all_results=False reads anything not verified as unknown. base_dir: filesystem mode's scanned folder, cut from each file path (staged files are copied there)."""
     findings = []
     for line in stdout.splitlines():
         line = line.strip()
@@ -425,7 +432,7 @@ def parse_findings(stdout, base_dir=None, all_results=False):
 
 def scan_cmd(binary, repo, since=None, head=None):
     cmd = [binary, "git", f"file://{Path(repo).resolve()}", "--json", "--no-update", "--no-ignore-tag",
-           "--results=verified,unknown", "--fail", "--fail-on-scan-errors"]
+           "--results=verified,unknown,unverified", "--fail", "--fail-on-scan-errors"]
     if since:
         cmd.append(f"--since-commit={since}")
     if head:
@@ -498,7 +505,7 @@ def run_trufflehog(binary, repo, since=None, head=None, timeout=SCAN_TIMEOUT):
         raise RuntimeError(f"TruffleHog timed out after {timeout}s")
     except OSError as exc:
         raise RuntimeError(f"TruffleHog could not start: {exc}")
-    findings = parse_findings(out.stdout)
+    findings = parse_findings(out.stdout, all_results=True)
     changed = changed_paths(repo, since, head) if since and head else None
     errors = logged_errors(out.stderr, (lambda path: path not in changed) if changed is not None else None)
     if out.returncode not in (0, FAIL_EXIT):
@@ -516,6 +523,215 @@ def run_trufflehog(binary, repo, since=None, head=None, timeout=SCAN_TIMEOUT):
     if since and head and scanned_bytes(out.stderr) == 0 and added_lines(repo, since, head) > 0:
         raise RuntimeError("TruffleHog read nothing although the commits add lines (is the commit on a branch?)")
     return findings
+
+
+# --------------------------------------------------------------------------- GitHub token shapes (2026-11-17)
+# TruffleHog drops a Github match whose text holds an English word (its false-positive word list): about 3 random
+# tokens in 1,000 hold one ("role", "byte", "part", "merit"), and such a token is missed on every scan, live check or
+# not (lessons/2026-11-17-trufflehog-misses-github-tokens-holding-a-word.md in nuey-skills). So every scan also looks for
+# the exact shapes of GitHub's tokens itself. A hit TruffleHog reported in any status keeps TruffleHog's verdict. For
+# one it did not report, TruffleHog is asked once more with its word filter off (results filtered_unverified) on just
+# those values, so the live check still decides: live fails, dead passes the push and CI scans like any dead key, and
+# no answer is "unknown", which fails. key-guard (scripts/key-guard/key_guard.py) reads this pattern from between the
+# two marker lines: keep it one string literal.
+# >>> github-token-pattern
+GITHUB_TOKEN_PATTERN = (
+    r"(?<![A-Za-z0-9_])(?:"
+    r"gh[pous]_[A-Za-z0-9]{36}"                     # ghp_ classic PAT, gho_ OAuth, ghu_ app user, ghs_ app install
+    r"|ghs_[0-9]{1,20}_eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}(?![A-Za-z0-9_-])"  # stateless app
+    #   installation token since 2026-10-02: ghs_<app id>_<JWT>, about 390 to 520 long (checked on our app's own token)
+    r"|ghr_(?:[A-Za-z0-9]{76}|[A-Za-z0-9]{36})"     # ghr_ app refresh token: 76 (36 in older lists)
+    r"|github_pat_[A-Za-z0-9]{22}_[A-Za-z0-9]{59}"  # fine-grained PAT: 22, an underscore, 59
+    r")(?![A-Za-z0-9_])"                            # as TruffleHog's own match ends, so both see the same value
+)
+# <<< github-token-pattern
+GITHUB_TOKEN = re.compile(GITHUB_TOKEN_PATTERN)
+SHAPE_DETECTOR = "Github"   # TruffleHog's name: the same fingerprint, so one allow-list entry covers both
+SHAPE_LABEL = "Github (shape check)"
+_HUNK = re.compile(rb"^(@{2,}) (?:-\S+ )+\+(\d+)(?:,\d+)? @{2,}")
+
+
+SHAPE_MIN_ENTROPY = 3.0   # bits per character of the part after the prefix; a real token is random (about 4.6)
+
+
+def entropy(text):
+    counts = {}
+    for ch in text:
+        counts[ch] = counts.get(ch, 0) + 1
+    n = float(len(text) or 1)
+    return -sum(c / n * math.log2(c / n) for c in counts.values())
+
+
+def shape_hits(line, cut=None):
+    """The GitHub-token-shaped values in one line of text (str). A placeholder such as ghp_xxxx... or
+    ghp_FAKEFAKE... (too little variety to be random) is skipped; no real token comes near the bound.
+    cut: ignore a match that ends after this index (a piece of a long line: the next piece sees it whole)."""
+    hits = [m.group(0) for m in GITHUB_TOKEN.finditer(line) if cut is None or m.end() <= cut]
+    return [v for v in hits if entropy(v.split("_", 2)[-1] if v.startswith(("github_pat_", "ghs_")) and v.count("_") > 1
+                                      else v[4:]) >= SHAPE_MIN_ENTROPY]
+
+
+def shape_finding(raw, file, line, commit="", raws=None):
+    """A safe finding (no value). raws: a dict that gets {fingerprint: value}, kept only in memory for the live
+    check of shape_verdicts; never printed or written."""
+    fp = fingerprint(SHAPE_DETECTOR, raw)
+    if raws is not None:
+        raws[fp] = raw
+    return {"detector": SHAPE_LABEL, "status": "unknown", "file": file, "line": line, "commit": commit,
+            "fingerprint": fp}
+
+
+SHAPE_CHUNK = 1 << 20      # a line longer than this (a binary file) is read in pieces, never whole
+SHAPE_OVERLAP = 2048       # longer than the longest token (a stateless ghs_ token, about 520): a match ending in the
+#                            last SHAPE_OVERLAP bytes of a piece waits, and the next piece starts 2 * SHAPE_OVERLAP back,
+#                            so a token cut by a piece boundary is seen whole, once
+
+
+def shape_scan_file(path, name, raws=None):
+    """Findings for a file on disk (a staged copy), shown as name. Bytes, any encoding, at most SHAPE_CHUNK at a time."""
+    out, seen = [], set()
+    n, carry = 1, b""
+    with open(path, "rb") as fh:
+        nxt = fh.readline(SHAPE_CHUNK)
+        while nxt:
+            piece, nxt = nxt, fh.readline(SHAPE_CHUNK)   # read one ahead: the last piece is whole even at 1 MiB
+            whole = piece.endswith(b"\n") or not nxt     # a line's end, or the file's
+            text = (carry + piece).decode("latin-1")
+            for raw in shape_hits(text, None if whole else len(text) - SHAPE_OVERLAP):
+                if (raw, n) not in seen:
+                    seen.add((raw, n))
+                    out.append(shape_finding(raw, name, n, raws=raws))
+            if whole:
+                n, carry = n + 1, b""
+            else:
+                carry = (carry + piece)[-2 * SHAPE_OVERLAP:]
+    return out
+
+
+def _unquote(path):
+    """A path git printed C-quoted ("a\\303\\251.txt", a name with a tab or quote) as raw bytes."""
+    if not path.startswith(b'"') or not path.endswith(b'"') or len(path) < 2:
+        return path
+    s, out, i = path[1:-1], bytearray(), 0
+    esc = {ord("n"): b"\n", ord("t"): b"\t", ord("r"): b"\r", ord("a"): b"\a", ord("b"): b"\b", ord("f"): b"\f",
+           ord("v"): b"\v"}
+    while i < len(s):
+        if s[i] == 0x5C and i + 1 < len(s):
+            nxt = s[i + 1]
+            if 0x30 <= nxt <= 0x37 and re.fullmatch(rb"[0-7]{3}", s[i + 1:i + 4]):
+                out.append(int(s[i + 1:i + 4], 8))
+                i += 4
+                continue
+            out += esc.get(nxt, bytes([nxt]))
+            i += 2
+            continue
+        out.append(s[i])
+        i += 1
+    return bytes(out)
+
+
+def shape_scan_commits(repo, commits, raws=None):
+    """Findings in the lines the given commits add (a merge: only what it changed itself, --cc; binary files as text,
+    the root commit too), from one streamed `git log -p` read at most SHAPE_CHUNK at a time, so neither a long history
+    nor a huge line (a minified bundle, a binary) is held in memory."""
+    commits = sorted(set(commits or ()))
+    if not commits:
+        return []
+    cmd = ["git", "-C", str(repo), "-c", "core.quotePath=false", "log", "--no-walk=unsorted", "--stdin", "-p",
+           "-U0", "--root", "--text", "--no-color", "--no-ext-diff", "--no-textconv", "--no-renames", "--cc",
+           "--src-prefix=a/", "--dst-prefix=b/", "--format=%x00%H"]
+    found, seen = [], set()
+    with tempfile.TemporaryFile() as ids, tempfile.TemporaryFile() as err:
+        ids.write(("\n".join(commits) + "\n").encode())
+        ids.seek(0)
+        proc = subprocess.Popen(cmd, stdin=ids, stdout=subprocess.PIPE, stderr=err)
+        sha, path, parents, line, in_hunk = "", None, 1, 0, False
+        cont, added, kept, carry = False, False, False, b""   # cont: this piece goes on the line before it
+
+        def scan(text, ends):
+            for raw in shape_hits(text.decode("latin-1"), None if ends else len(text) - SHAPE_OVERLAP):
+                if (raw, sha, path, line) not in seen:
+                    seen.add((raw, sha, path, line))
+                    found.append(shape_finding(raw, path, line, sha, raws=raws))
+
+        nxt = proc.stdout.readline(SHAPE_CHUNK)
+        while nxt:
+            piece, nxt = nxt, proc.stdout.readline(SHAPE_CHUNK)   # one ahead, so the output's last piece is whole
+            ends = piece.endswith(b"\n") or not nxt               # a line's end, or the output's
+            data = piece[:-1] if piece.endswith(b"\n") else piece
+            if cont:                                  # the rest of a long content line
+                if added:
+                    scan(carry + data, ends)
+                carry = (carry + data)[-2 * SHAPE_OVERLAP:]
+            elif in_hunk and data[:1] in (b"+", b"-", b" "):
+                prefix = data[:parents]
+                kept = b"-" not in prefix             # a removed line is not in the commit's version
+                added = kept and b"+" in prefix and path is not None
+                if added:
+                    scan(data[parents:], ends)
+                carry = data[parents:][-2 * SHAPE_OVERLAP:]
+            elif data.startswith(b"\x00"):
+                sha, path, in_hunk, kept, added = data[1:].decode("ascii", "replace").strip(), None, False, False, False
+            elif data.startswith(b"diff "):
+                path, in_hunk, kept, added = None, False, False, False
+            elif not in_hunk and data.startswith(b"+++ "):
+                name = _unquote(data[4:].rstrip(b"\t"))   # git adds a tab after a name with a space
+                path = None if name == b"/dev/null" else name[2:].decode("utf-8", "surrogateescape")
+            elif data.startswith(b"@@"):
+                m = _HUNK.match(data)
+                if m:
+                    parents, line, in_hunk, kept, added = len(m.group(1)) - 1, int(m.group(2)), True, False, False
+            else:
+                kept = added = False
+            cont = not ends
+            if ends and in_hunk and kept:
+                line += 1
+            if ends:
+                kept = added = False
+        proc.stdout.close()
+        rc = proc.wait()
+        if rc != 0:
+            err.seek(0)
+            raise RuntimeError(f"git log for the GitHub token check failed: "
+                               f"{err.read().decode('utf-8', 'replace').strip()[:200]}")
+    return found
+
+
+def shape_verdicts(binary, values, timeout=SCAN_TIMEOUT):
+    """{fingerprint: status} from TruffleHog for values its scan did not report, with its word filter off
+    (filtered_unverified): its own live check decides. A value it still does not report, or a run that fails,
+    gets no entry (the hit stays unknown, so it fails). The values sit in a private (0700) temp folder for the run
+    and are removed after it, like the staged copies scan_staged makes (a killed process can leave it behind)."""
+    if not values:
+        return {}
+    with tempfile.TemporaryDirectory(prefix="secret-scan-shapes-") as tmp:
+        folder = os.path.join(tmp, "values")
+        os.mkdir(folder, 0o700)
+        with open(os.path.join(folder, "values.txt"), "w", encoding="ascii") as fh:
+            fh.write("".join(f"{v}\n" for v in sorted(set(values))))
+        cmd = [c if not c.startswith("--results=") else c + ",filtered_unverified" for c in fs_scan_cmd(binary, folder)]
+        try:
+            out = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+        except (OSError, subprocess.SubprocessError):
+            return {}
+    if out.returncode not in (0, FAIL_EXIT):
+        return {}
+    return {f["fingerprint"]: f["status"] for f in parse_findings(out.stdout, all_results=True)
+            if f["detector"] == SHAPE_DETECTOR}
+
+
+def with_shape_hits(found, hits, keep_unverified, judged_by=None, binary=None, raws=None):
+    """TruffleHog's findings plus our shape hits whose value TruffleHog did not report in any status. With binary and
+    raws (from the shape scan), such a hit takes TruffleHog's live-check verdict (shape_verdicts); else unknown.
+    keep_unverified: the commit scan (every hit fails); the push and CI scans drop unverified ones.
+    judged_by: all of TruffleHog's findings in the range (default found), also those outside the added commits."""
+    judged = {f["fingerprint"] for f in (found if judged_by is None else judged_by) if f["detector"] == SHAPE_DETECTOR}
+    new = [h for h in hits if h["fingerprint"] not in judged]
+    if binary and raws and new:
+        verdict = shape_verdicts(binary, [raws[h["fingerprint"]] for h in new if h["fingerprint"] in raws])
+        for h in new:
+            h["status"] = verdict.get(h["fingerprint"], "unknown")
+    return [f for f in found + new if keep_unverified or f["status"] != "unverified"]
 
 
 # --------------------------------------------------------------------------- staged (pre-commit)
@@ -601,6 +817,9 @@ def scan_staged(binary, repo, entries, timeout=SCAN_TIMEOUT):
         except OSError as exc:
             raise RuntimeError(f"TruffleHog could not start: {exc}")
         findings = parse_findings(out.stdout, base_dir=folder, all_results=True)
+        hits, raws = [], {}
+        for rel, path in where.items():
+            hits += shape_scan_file(os.path.join(folder, rel), path, raws)
     errors = logged_errors(out.stderr)
     if out.returncode not in (0, FAIL_EXIT):
         raise RuntimeError(f"TruffleHog exited {out.returncode}{': ' + errors[-1] if errors else ''}")
@@ -616,7 +835,7 @@ def scan_staged(binary, repo, entries, timeout=SCAN_TIMEOUT):
         if f["file"] not in where:
             raise RuntimeError("TruffleHog named a file that was not staged")
         f["file"] = where[f["file"]]
-    return findings
+    return with_shape_hits(findings, hits, keep_unverified=True, binary=binary, raws=raws)
 
 
 # --------------------------------------------------------------------------- sensitive files (2026-11-17)
@@ -1044,6 +1263,10 @@ def report(findings, entries, problems, github=False):
 
 def advice(failing, staged=False):
     live = any(f["status"] == "verified" for f in failing)
+    if any(f["detector"] == SHAPE_LABEL and f["status"] == "unknown" for f in failing):
+        say("a 'Github (shape check)' token is one TruffleHog could not judge (a stateless ghs_<app id>_<JWT> token "
+            "never can); scanning again will not change it. Treat it as live: rotate or let it expire, take it out, "
+            f"and only for a test value or a token already revoked add its fingerprint to {ALLOW_FILE}.")
     if staged:
         say("the commit was refused, so the value is not in Git. Take it out of the file, keep it in 1Password "
             "(vault AI Agents) and read it at run time, then stage and commit again."
@@ -1104,7 +1327,13 @@ def scan_ranges(repo, ranges, binary):
     """[(findings, allow text)] per range; each pushed ref is judged by the allow list in its own commit."""
     out = []
     for since, head, added in ranges:
-        found = [f for f in run_trufflehog(binary, repo, since, head) if added is None or f["commit"] in added]
+        found = run_trufflehog(binary, repo, since, head)
+        # --full: the branches and tags, what TruffleHog's clone of the repo holds (not stashes or remote refs)
+        commits = added if added is not None else (git(repo, "rev-list", "--branches", "--tags") or "").split()
+        raws = {}
+        hits = shape_scan_commits(repo, commits, raws)
+        found = with_shape_hits([f for f in found if added is None or f["commit"] in added], hits,
+                                keep_unverified=False, judged_by=found, binary=binary, raws=raws)
         out.append((found, read_allow_text(repo, head)))
     return out
 
