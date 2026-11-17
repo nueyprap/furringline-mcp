@@ -17,7 +17,7 @@ a copy in .jev/jev_gate.py that install.py keeps up to date.
 """
 from __future__ import annotations
 
-VERSION = "0.1.11"
+VERSION = "0.1.12"
 
 import argparse
 import concurrent.futures
@@ -333,7 +333,7 @@ def push_base(repo, remote_sha, local_sha):
     Starts from the remote tip, but leaves out commits already reachable from the
     default branch (origin/main): a tool branch that merged main is not re-reviewed
     for other agents' merged work. When the remote tip and main diverge, the base is
-    their clean merge tree; a conflicted merge falls back to the remote tip (stricter).
+    their clean merge tree; a conflicted merge is reviewed against main (what lands, 0.1.12).
     """
     remote = remote_sha if set(remote_sha) != {"0"} and is_commit(repo, remote_sha) else None
     if remote:
@@ -350,7 +350,7 @@ def push_base(repo, remote_sha, local_sha):
     tree = git_try(repo, "merge-tree", "--write-tree", "--no-messages", remote, main)
     if tree and tree.strip():
         return tree.split()[0], remote, [remote, main]
-    return remote, remote, [remote]
+    return main, main, [remote, main]   # log: only what this push adds, so an earlier override never counts
 
 
 def collect_pre_push(repo, stdin_text, base_override=None, strict=False):
