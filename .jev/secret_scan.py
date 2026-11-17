@@ -592,11 +592,10 @@ def shape_scan_file(path, name, raws=None):
     out, seen = [], set()
     n, carry = 1, b""
     with open(path, "rb") as fh:
-        while True:
-            piece = fh.readline(SHAPE_CHUNK)
-            if not piece:
-                break
-            whole = piece.endswith(b"\n") or len(piece) < SHAPE_CHUNK   # a line's end, or the file's
+        nxt = fh.readline(SHAPE_CHUNK)
+        while nxt:
+            piece, nxt = nxt, fh.readline(SHAPE_CHUNK)   # read one ahead: the last piece is whole even at 1 MiB
+            whole = piece.endswith(b"\n") or not nxt     # a line's end, or the file's
             text = (carry + piece).decode("latin-1")
             for raw in shape_hits(text, None if whole else len(text) - SHAPE_OVERLAP):
                 if (raw, n) not in seen:
@@ -655,11 +654,10 @@ def shape_scan_commits(repo, commits, raws=None):
                     seen.add((raw, sha, path, line))
                     found.append(shape_finding(raw, path, line, sha, raws=raws))
 
-        while True:
-            piece = proc.stdout.readline(SHAPE_CHUNK)
-            if not piece:
-                break
-            ends = piece.endswith(b"\n") or len(piece) < SHAPE_CHUNK      # a line's end, or the output's
+        nxt = proc.stdout.readline(SHAPE_CHUNK)
+        while nxt:
+            piece, nxt = nxt, proc.stdout.readline(SHAPE_CHUNK)   # one ahead, so the output's last piece is whole
+            ends = piece.endswith(b"\n") or not nxt               # a line's end, or the output's
             data = piece[:-1] if piece.endswith(b"\n") else piece
             if cont:                                  # the rest of a long content line
                 if added:
