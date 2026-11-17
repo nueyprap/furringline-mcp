@@ -21,6 +21,8 @@
 # on the default branch's head, not on the PR. A repository with no CI sets the repository variable
 # REVIEW_ON_PUSH=true and keeps the review on every push. Callers (gates-from-main, checks-from-main) must grant
 # `statuses: write` and `actions: read`; install.py adds them.
+# Answers run (2026-11-17): workflow_dispatch with input pr, started by agent-merge --answer; no Claude call. See
+# nuey-skills .agents/skills/second-reviewer/references/AFTER_CI.md.
 name: review
 
 on:
@@ -30,6 +32,11 @@ on:
     workflows: [ci, CI, test, Repository check]
     types: [completed]
   workflow_dispatch:
+    inputs:
+      pr:
+        description: "Answers run: the PR number whose reviewer-note answers to count (no Claude call; agent-merge --answer starts it)"
+        required: false
+        type: string
   workflow_call:
 
 permissions:
@@ -42,7 +49,7 @@ permissions:
 # commit's review replaces an older one; any other workflow_run (a push-event CI, a failed CI) gets a group of its
 # own and can never cancel a review in progress, which would leave `review` stuck as running.
 concurrency:
-  group: review-${{ github.event_name }}-${{ github.event.pull_request.number || (github.event.workflow_run.event == 'pull_request' && contains(fromJSON('["success","skipped"]'), github.event.workflow_run.conclusion) && github.event.workflow_run.head_repository.full_name == github.repository && github.event.workflow_run.head_branch) || github.event.workflow_run.id || github.ref }}
+  group: review-${{ github.event_name }}-${{ github.event.pull_request.number || (github.event.workflow_run.event == 'pull_request' && contains(fromJSON('["success","skipped"]'), github.event.workflow_run.conclusion) && github.event.workflow_run.head_repository.full_name == github.repository && github.event.workflow_run.head_branch) || github.event.workflow_run.id || inputs.pr || github.ref }}
   cancel-in-progress: true
 
 jobs:
@@ -60,6 +67,8 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 45
     env:
+      # The answers run (workflow_dispatch with input pr): see the header.
+      ANSWERS: ${{ github.event_name == 'workflow_dispatch' && inputs.pr != '' && 'true' || '' }}
       SKIP_SUFFIXES: ".md .mdx .markdown .rst"
       # Repositories where docs are the product (agent instructions): docs-only PRs are reviewed there too.
       REVIEW_DOCS_REPOS: "nueyprap/nuey-skills"
@@ -344,14 +353,16 @@ jobs:
     steps:
       # After CI (workflow_run): find the open PR whose head is the commit CI just passed. A newer push or a
       # closed PR means there is nothing to review here (the newer commit's CI starts its own review).
+      # The answers run: the open same-repository PR it was given, at its current head.
       - name: Pull request
         id: pr
-        if: github.event_name == 'workflow_run'
+        if: github.event_name == 'workflow_run' || env.ANSWERS == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
           SHA: ${{ github.event.workflow_run.head_sha }}
           PRS: ${{ toJSON(github.event.workflow_run.pull_requests) }}
+          ANSWERS_PR: ${{ env.ANSWERS == 'true' && inputs.pr || '' }}
         shell: bash
         run: |
           python3 - <<'PY'
@@ -360,15 +371,22 @@ jobs:
               p = subprocess.run(["gh", "api", path], capture_output=True, text=True)
               return json.loads(p.stdout or "null") if p.returncode == 0 else None
           repo, sha = os.environ["REPO"], os.environ["SHA"]
+          answers_pr = (os.environ.get("ANSWERS_PR") or "").strip()
+          if answers_pr:  # the answers run: the PR it was given, at its current head
+              got = gh(f"repos/{repo}/pulls/{answers_pr}") if answers_pr.isdigit() else None
+              if got and ((got.get("head") or {}).get("repo") or {}).get("full_name") == repo:
+                  sha = got["head"]["sha"]
           nums = [p["number"] for p in json.loads(os.environ.get("PRS") or "[]") or [] if (p.get("head") or {}).get("sha") == sha]
-          if not nums:
+          if answers_pr:
+              nums = [int(answers_pr)] if answers_pr.isdigit() and sha else []
+          elif not nums:
               nums = [p["number"] for p in gh(f"repos/{repo}/commits/{sha}/pulls") or []
                       if p.get("state") == "open" and p["head"]["sha"] == sha and (p["head"].get("repo") or {}).get("full_name") == repo]
           out = {"go": "false"}
           for n in nums:
               pr = gh(f"repos/{repo}/pulls/{n}") or {}
               if pr.get("state") == "open" and pr["head"]["sha"] == sha:
-                  out = {"go": "true", "number": str(n), "base": pr["base"]["ref"], "head_ref": pr["head"]["ref"]}
+                  out = {"go": "true", "number": str(n), "base": pr["base"]["ref"], "head_ref": pr["head"]["ref"], "sha": sha}
                   break
           if out["go"] == "false":
               print(f"::notice::No open pull request has {sha[:9]} as its head now (a newer push or a closed PR): nothing to review.")
@@ -381,7 +399,7 @@ jobs:
       # it (not on a call from gates-from-main / checks-from-main: that run is main's reviewer with its own check).
       - name: Review check
         id: check
-        if: github.event_name != 'pull_request_target' && steps.pr.outputs.go != 'false'
+        if: github.event_name != 'pull_request_target' && steps.pr.outputs.go != 'false' && env.ANSWERS != 'true'
         env:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
@@ -393,13 +411,14 @@ jobs:
             -f description="Second review: running" -f target_url="$RUN_URL" >/dev/null \
             || echo "::warning::could not mark the review status as pending"
 
+      # The answers run leaves `review` as it is until its Verdict (it may post nothing: see the header).
       # A normal run checks out the PR head. Under pull_request_target (called by gates-from-main) it checks
       # out the base branch (the default ref) without a stored token; the Scope step fetches the PR head as data.
       - uses: actions/checkout@v4
         if: steps.pr.outputs.go != 'false'
         with:
           fetch-depth: 0
-          ref: ${{ github.event_name == 'workflow_run' && github.event.workflow_run.head_sha || (github.event_name != 'pull_request_target' && (github.event.pull_request.head.sha || github.sha) || '') }}
+          ref: ${{ github.event_name == 'workflow_run' && github.event.workflow_run.head_sha || env.ANSWERS == 'true' && steps.pr.outputs.sha || (github.event_name != 'pull_request_target' && (github.event.pull_request.head.sha || github.sha) || '') }}
           persist-credentials: ${{ github.event_name != 'pull_request_target' }}
 
       - name: Scope
@@ -766,7 +785,7 @@ jobs:
           def trusted_round():
               """The newest round kept by a run of this file on workflow_run, or None (see valid_round)."""
               import io, zipfile
-              if os.environ.get("EVENT") != "workflow_run" or not pr:
+              if (os.environ.get("EVENT") != "workflow_run" and os.environ.get("ANSWERS") != "true") or not pr:
                   return None
               repo = os.environ["REPO"]
               arts = json.loads(sh("gh", "api", f"repos/{repo}/actions/artifacts?name=second-review-round-pr{pr}&per_page=30",
@@ -806,6 +825,14 @@ jobs:
           need = (out.get("code") == "true" and code_mode != "reuse") or (out.get("rules") == "true" and rule_mode != "reuse")
           out.update(code_mode=code_mode, rule_mode=rule_mode, need_claude="true" if need else "false",
                      prev_sha=prev_code["sha"] if prev_code and code_mode != "full" else "")
+          # The answers run never calls Claude, and acts only on the commit the last round reviewed (its CI passed);
+          # otherwise it posts nothing and the push's own review counts the answers.
+          if os.environ.get("ANSWERS") == "true" and (need or out.get("skip") == "true" or not last_round
+                                                      or last_round.get("sha") != head_full):
+              out.update(skip="true", answers_stale="true", need_claude="false",
+                         reason="answers run: the PR head is not the commit the last review passed (new commits, or no "
+                                "review yet), so the push's own review counts the answers")
+              print(f"::notice::{out['reason']}")
           if rules:  # the rule review's packet (same files as scripts/rule-review/rule_review.py writes)
               os.makedirs(".rule-review", exist_ok=True)
               for name in ("pr.md", "files.txt", "diff.patch"):
@@ -1277,7 +1304,7 @@ jobs:
 
       - name: Verdict
         id: verdict
-        if: ${{ !cancelled() && steps.pr.outputs.go != 'false' }}
+        if: ${{ !cancelled() && steps.pr.outputs.go != 'false' && steps.scope.outputs.answers_stale != 'true' }}
         env:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
@@ -1298,7 +1325,7 @@ jobs:
           RULE_PLAN_TOKEN: ${{ steps.rules.outputs.key }}
           RULE_KEYS_TRIED: ${{ steps.rules.outputs.tried }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-          HEAD_SHA: ${{ github.event.workflow_run.head_sha || github.event.pull_request.head.sha || github.sha }}
+          HEAD_SHA: ${{ github.event.workflow_run.head_sha || github.event.pull_request.head.sha || steps.pr.outputs.sha || github.sha }}
           CODE_MODE: ${{ steps.scope.outputs.code_mode }}
           RULE_MODE: ${{ steps.scope.outputs.rule_mode }}
           PREV_SHA: ${{ steps.scope.outputs.prev_sha }}
@@ -1317,9 +1344,10 @@ jobs:
           # --- review notes: start (agent-merge's notes functions read what this writes; its tests check they agree) ---
           # Reviewer notes (2026-11-17, nuey-skills projects/agent-system-rebuild/findings/2026-11-17-notes-reach-the-author.md):
           # on a PR agent-merge opened (its AGENT_MARK line), a pass with notes nobody answered posts `review` as failure.
-          # The author answers each note in a PR comment (agent-merge --answer), then agent-merge re-runs this review run:
-          # the same commit reuses the pass (no Claude call) and this step finds every note answered. Open notes ride in
-          # the round artifact, which only this file's after-CI run writes, so a comment cannot forge them away.
+          # The author answers each note in a PR comment (agent-merge --answer), then agent-merge starts the answers run
+          # (workflow_dispatch, input pr): it reuses the pass (no Claude call) and this step finds every note answered.
+          # Open notes ride in the round artifact, which only this file's after-CI run writes, so a comment cannot forge
+          # them away.
           AGENT_MARK = "<!-- agent-merge: answers notes -->"
           ANSWER_MARK = "<!-- review-notes-answered -->"
           NOTES_HEAD = "**Notes to answer before this lands"
@@ -1340,6 +1368,22 @@ jobs:
                       out[m.group(1)] = m.group(2).strip()
               return out
           NOTES_DESC = "Second review: pass; {n} note(s) need an answer (run agent-merge)"
+          # Notes stop looping (2026-11-17, auto-update#79 went 6 rounds): only notes raised before the first answer
+          # hold a PR. Notes a later round raises go under LATER_HEAD, never hold, and agent-merge files them as one
+          # follow-up job when the PR lands; after NOTES_CAP answered rounds no note holds. Blockers stay problems (FAIL).
+          LATER_HEAD = "**Later notes for one follow-up job"
+          NOTES_CAP = 2
+          def answer_rounds(bodies):
+              """How many answer comments (not by the bot) give at least one counted answer: the answered rounds."""
+              return sum(1 for b in bodies if answers_in(b))
+          def holding(notes, rounds):
+              """Split open notes into (held, later): before any answer every note holds; after one, only notes held
+              before (`held` true in the round) still hold; from NOTES_CAP answered rounds on, none does."""
+              if rounds >= NOTES_CAP:
+                  return [], list(notes)
+              if rounds == 0:
+                  return list(notes), []
+              return [n for n in notes if n.get("held") is True], [n for n in notes if n.get("held") is not True]
           # --- review notes: end ---
           def usage(path):
               info = {}
@@ -1406,6 +1450,10 @@ jobs:
           reused = (f"Reused the pass of commit {prev}: the only commits since then are merges of "
                     f"{env.get('BASE_REF') or 'the base branch'} that git made by itself (no conflict resolved by hand), "
                     "so there is nothing new to review. No Claude usage.")
+          if env.get("PREV_SHA") and env.get("PREV_SHA") == env.get("HEAD_SHA"):
+              reused = "Reused the pass of this commit: it was reviewed already, so there is nothing new to review. No Claude usage."
+          # The after-CI run and the answers run hold an agent-merge PR on notes; the answers run keeps no round.
+          after_ci = env.get("EVENT") == "workflow_run" or env.get("ANSWERS") == "true"
           runs = []  # (kind, verdict, lines, usage, key, tried)
           if env.get("SKIP") == "true":
               verdict, lines = "skip", [f"Skipped: {env.get('REASON')}. No Claude usage."]
@@ -1449,7 +1497,7 @@ jobs:
           footer = "\n\n<sub>" + " · ".join(meta) + "</sub>"
           pr = env.get("PR")
           cid, old = [], ""
-          answered, pr_body = {}, ""
+          answered, pr_body, answer_bodies = {}, "", []
           if pr and verdict != "skip":
               got = subprocess.run(["gh", "api", f"repos/{env['REPO']}/issues/{pr}/comments", "--paginate", "--jq",
                                     '.[] | [.id, .user.login, .body] | @json'], capture_output=True, text=True).stdout
@@ -1463,6 +1511,7 @@ jobs:
                       old = c_body or ""
                   elif login != "github-actions[bot]":
                       answered.update(answers_in(c_body))
+                      answer_bodies.append(c_body)
               got_body = subprocess.run(["gh", "api", f"repos/{env['REPO']}/pulls/{pr}", "--jq", ".body"],
                                         capture_output=True, text=True)
               # fail closed: a PR body that cannot be read is treated as agent-merge's, so open notes still hold it
@@ -1481,19 +1530,36 @@ jobs:
               carried = json.load(open(os.path.join(env.get("RUNNER_TEMP") or ".", "second-review-prev-notes.json")))
           except (OSError, ValueError):
               carried = []
-          open_notes = [n for n in {n["id"]: n for n in carried + round_notes if isinstance(n, dict) and n.get("id")}.values()
-                        if n["id"] not in answered]
+          # a note carried from the round keeps its `held` mark (first wins: carried before this round's); the same
+          # words raised again stay one note, and the id is a hash of the words, so the text is the same either way
+          merged_notes = {}
+          for n in carried + round_notes:
+              if isinstance(n, dict) and n.get("id") and n["id"] not in merged_notes:
+                  merged_notes[n["id"]] = n
+          rounds = answer_rounds(answer_bodies)
+          open_notes = [n for n in merged_notes.values() if n["id"] not in answered]
+          held, later = holding(open_notes, rounds)
+          open_notes = [dict(n, held=True) for n in held] + [dict(n, held=False) for n in later]
           landed = AGENT_MARK in (pr_body or "")
-          # Only the after-CI run (workflow_run) holds a PR on notes: only it keeps rounds, so only its re-run reuses the
-          # pass. REVIEW_ON_PUSH and dispatch runs keep notes as advice.
-          gate = (env.get("PUBLISH") == "true" and env.get("EVENT") == "workflow_run" and verdict == "pass" and landed
-                  and bool(open_notes))
-          if verdict != "skip" and open_notes:
-              lines.append(f"\n{NOTES_HEAD} ({len(open_notes)}):** read each against the code, fix what is real, then answer "
-                           "every one: `agent-merge --answer \"<id>: fixed in <commit>: ...\"` or "
-                           "`--answer \"<id>: not a bug because ...\"`." if landed and env.get("EVENT") == "workflow_run" else
-                           "\nNotes (advice: no answer is needed on this PR):")
+          # Only the after-CI run (workflow_run) and the answers run hold a PR on notes: rounds are kept after CI, so the
+          # answers run can reuse the pass. REVIEW_ON_PUSH and plain dispatch runs keep notes as advice.
+          gate = (env.get("PUBLISH") == "true" and after_ci and verdict == "pass" and landed and bool(held))
+          if verdict != "skip" and open_notes and not (landed and after_ci):
+              lines.append("\nNotes (advice: no answer is needed on this PR):")
               lines += [f"- `{n['id']}` {n['text']}" for n in open_notes]
+          elif verdict != "skip" and open_notes:
+              # later notes first: agent-merge reads the notes to answer from NOTES_HEAD to the end
+              if later:
+                  why = (f"{rounds} answered rounds reached the cap of {NOTES_CAP}" if rounds >= NOTES_CAP else
+                         "raised after the notes were answered")
+                  lines.append(f"\n{LATER_HEAD} ({len(later)}):** {why}, so they do not hold this PR; agent-merge files "
+                               "them as one follow-up job when it lands. No answer is needed.")
+                  lines += [f"- `{n['id']}` {n['text']}" for n in later]
+              if held:
+                  lines.append(f"\n{NOTES_HEAD} ({len(held)}):** read each against the code, fix what is real, then "
+                               "answer every one in one go: `agent-merge --answer \"<id>: fixed in <commit>: ...\"` or "
+                               "`--answer \"<id>: not a bug because ...\"`. Notes a later round raises will not hold it.")
+                  lines += [f"- `{n['id']}` {n['text']}" for n in held]
           # The next round reads this round's rule-review points from a hidden line (round_note); a run with no
           # rule verdict keeps the line it found, so a "could not review" retry does not wipe the memory.
           note = ""
@@ -1554,7 +1620,7 @@ jobs:
           if env.get("PUBLISH") == "true" and re.fullmatch(r"[0-9a-f]{40}", full_sha):
               n = len(re.findall(r"^\d+\. \*\*", "\n".join(lines), re.M))
               desc = head.replace(f"{LABEL}: ", "Second review: ") + (f", {n} problem(s)" if verdict == "fail" and n else "")
-              desc = NOTES_DESC.format(n=len(open_notes)) if gate else desc
+              desc = NOTES_DESC.format(n=len(held)) if gate else desc
               desc = (desc + ". Details: the PR comment")[:140]
               p = subprocess.run(["gh", "api", "-X", "POST", f"repos/{env['REPO']}/statuses/{full_sha}",
                                   "-f", f"state={'failure' if verdict == 'fail' or gate else 'success'}", "-f", "context=review",
@@ -1569,7 +1635,7 @@ jobs:
                   g.write(f"verdict={verdict}\n" + ("round=true\n" if keep and env.get("RUNNER_TEMP") else ""))
           # After CI the job's own check sits on the default branch's head, so it fails only when the review status
           # could not be written; on the other events it fails with the verdict, as before.
-          if env.get("EVENT") == "workflow_run":
+          if after_ci:
               sys.exit(0 if posted else 1)
           sys.exit(1 if verdict == "fail" or not posted else 0)
           PY
@@ -1582,7 +1648,7 @@ jobs:
           name: second-review-round-pr${{ steps.scope.outputs.pr }}
           path: ${{ runner.temp }}/second-review-round/round.json
           retention-days: 30
-          overwrite: true  # a re-run of this run (agent-merge after the notes are answered) keeps its round again
+          overwrite: true  # a re-run of this run (by hand, or agent-merge before the answers run is installed) keeps its round
           if-no-files-found: ignore
 
       # usage.py counts these two: after CI the job itself passes (the verdict is on the `review` check), so a failed
@@ -1591,5 +1657,5 @@ jobs:
         if: ${{ !cancelled() && steps.verdict.outputs.verdict == 'fail' }}
         run: echo "The second review failed this pull request; the review check on its head commit says why."
       - name: "Verdict: reused"
-        if: ${{ !cancelled() && steps.scope.outputs.skip != 'true' && steps.scope.outputs.need_claude == 'false' }}
+        if: ${{ !cancelled() && steps.scope.outputs.skip != 'true' && steps.scope.outputs.need_claude == 'false' && env.ANSWERS != 'true' }}
         run: echo "Reused the last pass; no Claude run."
