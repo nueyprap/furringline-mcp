@@ -789,6 +789,10 @@ jobs:
 
           code_mode, rule_mode = "full", "full"
           last_round = trusted_round() if out.get("skip") != "true" else None
+          # Reviewer notes (2026-11-17): the last round's unanswered notes, for the Verdict step (only from the trusted round).
+          if os.environ.get("RUNNER_TEMP"):
+              with open(os.path.join(os.environ["RUNNER_TEMP"], "second-review-prev-notes.json"), "w") as f:
+                  json.dump([n for n in (last_round or {}).get("notes") or [] if isinstance(n, dict) and n.get("id")], f)
           prev_code = as_prev(last_round, "code")
           if out.get("skip") != "true" and out.get("code") == "true":
               code_mode, code_info = code_round_plan(prev_code, head_full, f"origin/{base}", git_out)
@@ -1310,6 +1314,33 @@ jobs:
           env = os.environ
           MARK = env.get("MARK") or "<!-- second-reviewer -->"
           LABEL = env.get("LABEL") or "Second review"
+          # --- review notes: start (agent-merge's notes functions read what this writes; its tests check they agree) ---
+          # Reviewer notes (2026-11-17, nuey-skills projects/agent-system-rebuild/findings/2026-11-17-notes-reach-the-author.md):
+          # on a PR agent-merge opened (its AGENT_MARK line), a pass with notes nobody answered posts `review` as failure.
+          # The author answers each note in a PR comment (agent-merge --answer), then agent-merge re-runs this review run:
+          # the same commit reuses the pass (no Claude call) and this step finds every note answered. Open notes ride in
+          # the round artifact, which only this file's after-CI run writes, so a comment cannot forge them away.
+          AGENT_MARK = "<!-- agent-merge: answers notes -->"
+          ANSWER_MARK = "<!-- review-notes-answered -->"
+          NOTES_HEAD = "**Notes to answer before this lands"
+          def note_id(text):
+              """A short id for one note; the same words give the same id in every round."""
+              import hashlib as _hl
+              return "n" + _hl.sha1(" ".join(str(text).split()).lower().encode()).hexdigest()[:5]
+          def answers_in(body):
+              """{note id: answer} from an answer comment's lines `- nxxxxx: fixed ...` / `- nxxxxx: not a bug because ...`;
+              an answer needs at least two words of reason after its opening words."""
+              import re as _re
+              out = {}
+              if not (body or "").startswith(ANSWER_MARK):
+                  return out
+              for m in _re.finditer(r"^[-*]?\s*`?(n[0-9a-f]{5})`?:?\s+((?:fixed|not a bug because)\b.*\S.*)$", body, _re.M | _re.I):
+                  why = _re.match(r"(?i)\s*(fixed|not a bug because)\b(.*)$", m.group(2), _re.S)
+                  if why and len(why.group(2).split()) >= 2:
+                      out[m.group(1)] = m.group(2).strip()
+              return out
+          NOTES_DESC = "Second review: pass; {n} note(s) need an answer (run agent-merge)"
+          # --- review notes: end ---
           def usage(path):
               info = {}
               try:
@@ -1351,10 +1382,7 @@ jobs:
                   lines.append(f"\n{i}. **{p.get('kind')}** `{where}`: {p.get('what')}"
                                + (f"\n   Scenario: {p.get('scenario')}" if scenario and p.get("scenario") else "")
                                + f"\n   Fix: {p.get('fix')}")
-              if out.get("notes"):
-                  lines.append("\nNotes (not blocking):")
-                  lines += [f"- {n}" for n in out["notes"][:5]]
-              return out["verdict"], lines
+              return out["verdict"], lines  # notes: one list with ids below (reviewer notes, 2026-11-17)
           def meta_of(u, key, tried):
               m = []
               if u.get("model"):
@@ -1421,13 +1449,51 @@ jobs:
           footer = "\n\n<sub>" + " · ".join(meta) + "</sub>"
           pr = env.get("PR")
           cid, old = [], ""
+          answered, pr_body = {}, ""
           if pr and verdict != "skip":
-              rows = subprocess.run(["gh", "api", f"repos/{env['REPO']}/issues/{pr}/comments", "--paginate", "--jq",
-                                     f'.[] | select(.user.login == "github-actions[bot]" and (.body | startswith("{MARK}"))) | "\\(.id) \\(.body | @base64)"'],
-                                    capture_output=True, text=True).stdout.split("\n")
-              rows = [r.split() for r in rows if len(r.split()) == 2]
-              cid = [r[0] for r in rows]
-              old = base64.b64decode(rows[-1][1]).decode("utf-8", "replace") if rows else ""
+              got = subprocess.run(["gh", "api", f"repos/{env['REPO']}/issues/{pr}/comments", "--paginate", "--jq",
+                                    '.[] | [.id, .user.login, .body] | @json'], capture_output=True, text=True).stdout
+              for row in got.split("\n"):  # not splitlines(): a comment may hold U+2028
+                  try:
+                      c_id, login, c_body = json.loads(row)
+                  except (ValueError, TypeError):
+                      continue
+                  if login == "github-actions[bot]" and (c_body or "").startswith(MARK):
+                      cid.append(str(c_id))
+                      old = c_body or ""
+                  elif login != "github-actions[bot]":
+                      answered.update(answers_in(c_body))
+              got_body = subprocess.run(["gh", "api", f"repos/{env['REPO']}/pulls/{pr}", "--jq", ".body"],
+                                        capture_output=True, text=True)
+              # fail closed: a PR body that cannot be read is treated as agent-merge's, so open notes still hold it
+              pr_body = got_body.stdout if got_body.returncode == 0 else AGENT_MARK
+          # Reviewer notes: this round's (code and rule review) plus the last trusted round's unanswered ones.
+          round_notes = []
+          for structured, ran in ((env.get("STRUCTURED"), env.get("CODE") != "false" and env.get("CODE_MODE") != "reuse"),
+                                  (env.get("RULE_STRUCTURED"), env.get("RULES") == "true" and env.get("RULE_MODE") != "reuse")):
+              try:
+                  o = json.loads(structured or "") if ran else None
+              except ValueError:
+                  o = None
+              if isinstance(o, dict) and o.get("verdict") in ("pass", "fail"):
+                  round_notes += [{"id": note_id(n), "text": " ".join(str(n).split())} for n in (o.get("notes") or [])[:5]]
+          try:
+              carried = json.load(open(os.path.join(env.get("RUNNER_TEMP") or ".", "second-review-prev-notes.json")))
+          except (OSError, ValueError):
+              carried = []
+          open_notes = [n for n in {n["id"]: n for n in carried + round_notes if isinstance(n, dict) and n.get("id")}.values()
+                        if n["id"] not in answered]
+          landed = AGENT_MARK in (pr_body or "")
+          # Only the after-CI run (workflow_run) holds a PR on notes: only it keeps rounds, so only its re-run reuses the
+          # pass. REVIEW_ON_PUSH and dispatch runs keep notes as advice.
+          gate = (env.get("PUBLISH") == "true" and env.get("EVENT") == "workflow_run" and verdict == "pass" and landed
+                  and bool(open_notes))
+          if verdict != "skip" and open_notes:
+              lines.append(f"\n{NOTES_HEAD} ({len(open_notes)}):** read each against the code, fix what is real, then answer "
+                           "every one: `agent-merge --answer \"<id>: fixed in <commit>: ...\"` or "
+                           "`--answer \"<id>: not a bug because ...\"`." if landed and env.get("EVENT") == "workflow_run" else
+                           "\nNotes (advice: no answer is needed on this PR):")
+              lines += [f"- `{n['id']}` {n['text']}" for n in open_notes]
           # The next round reads this round's rule-review points from a hidden line (round_note); a run with no
           # rule verdict keeps the line it found, so a "could not review" retry does not wipe the memory.
           note = ""
@@ -1456,7 +1522,7 @@ jobs:
                   return None
               return {"verdict": o["verdict"], "problems": [{k: x.get(k) for k in ("kind", "file", "line", "what", "fix")}
                                                             for x in o.get("problems") or [] if isinstance(x, dict)]}
-          kept = {"pr": str(env.get("PR") or ""), "sha": full_sha,
+          kept = {"pr": str(env.get("PR") or ""), "sha": full_sha, "notes": open_notes,
                   "code": part("code", env.get("STRUCTURED"), env.get("CODE_MODE")) if env.get("CODE") == "true" else None,
                   "rules": part("rules", env.get("RULE_STRUCTURED"), env.get("RULE_MODE")) if env.get("RULES") == "true" else None}
           keep = (env.get("EVENT") == "workflow_run" and verdict != "skip" and kept["pr"] and (kept["code"] or kept["rules"])
@@ -1488,9 +1554,10 @@ jobs:
           if env.get("PUBLISH") == "true" and re.fullmatch(r"[0-9a-f]{40}", full_sha):
               n = len(re.findall(r"^\d+\. \*\*", "\n".join(lines), re.M))
               desc = head.replace(f"{LABEL}: ", "Second review: ") + (f", {n} problem(s)" if verdict == "fail" and n else "")
+              desc = NOTES_DESC.format(n=len(open_notes)) if gate else desc
               desc = (desc + ". Details: the PR comment")[:140]
               p = subprocess.run(["gh", "api", "-X", "POST", f"repos/{env['REPO']}/statuses/{full_sha}",
-                                  "-f", f"state={'failure' if verdict == 'fail' else 'success'}", "-f", "context=review",
+                                  "-f", f"state={'failure' if verdict == 'fail' or gate else 'success'}", "-f", "context=review",
                                   "-f", f"description={desc}", "-f", f"target_url={comment_url or env['RUN_URL']}"],
                                  capture_output=True, text=True)
               if p.returncode != 0:
@@ -1515,6 +1582,7 @@ jobs:
           name: second-review-round-pr${{ steps.scope.outputs.pr }}
           path: ${{ runner.temp }}/second-review-round/round.json
           retention-days: 30
+          overwrite: true  # a re-run of this run (agent-merge after the notes are answered) keeps its round again
           if-no-files-found: ignore
 
       # usage.py counts these two: after CI the job itself passes (the verdict is on the `review` check), so a failed
