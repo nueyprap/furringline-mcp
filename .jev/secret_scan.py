@@ -619,6 +619,317 @@ def scan_staged(binary, repo, entries, timeout=SCAN_TIMEOUT):
     return findings
 
 
+# --------------------------------------------------------------------------- sensitive files (2026-11-17)
+# Spreadsheets, PDFs, office files and payroll or HR data never go into Git (Narathip, 2026-11-17: an agent's
+# rescue of unplaced files must send them to Dropbox Agent Backups, never to a Git branch). The commit, push and
+# CI scans refuse (a) a spreadsheet (.xlsx .xls .csv ...) with HR, payroll or ID-like content, always, and (b) any
+# binary office file or PDF outside the allow list's "files" entries. stay-current's rescue
+# (scripts/stay-current/stuck.py) uses the same sensitive_reason() to pick what goes to Dropbox: for tracked files
+# the gate's own answer, for untracked ones a wider net. Only the path and the reason are printed, never a value.
+
+SHEET_EXT = {".xlsx", ".xlsm", ".xltx", ".xltm", ".xlsb", ".xls", ".ods", ".numbers", ".csv", ".tsv"}
+OFFICE_EXT = SHEET_EXT - {".csv", ".tsv"} | {".docx", ".docm", ".dotx", ".dotm", ".doc", ".odt", ".pages", ".rtf",
+                                            ".pptx", ".pptm", ".potx", ".ppsx", ".ppt", ".odp", ".key", ".pdf"}
+ZIP_TEXT_EXT = {".xlsx", ".xlsm", ".xltx", ".xltm", ".ods", ".docx", ".docm", ".dotx", ".dotm", ".odt", ".pptx",
+                ".pptm", ".potx", ".ppsx", ".odp"}
+IMAGE_EXT = {".png", ".jpg", ".jpeg", ".heic", ".heif", ".tif", ".tiff", ".webp", ".bmp", ".gif"}
+# Text kinds where a payroll word is normal prose (docs and code about the HR work); only ID-like numbers count.
+PROSE_EXT = {".md", ".py", ".sh", ".js", ".mjs", ".cjs", ".ts", ".tsx", ".jsx", ".yml", ".yaml", ".toml", ".html",
+             ".css", ".swift", ".go", ".rs", ".rb", ".sql", ".ini", ".cfg"}
+# The payroll words of outside_change_check._PAYROLL_MARKERS (nuey-skills scripts/outside-change-check; a test keeps
+# them equal): this file is copied alone into every repo, so it cannot import that one. The HR sheet's ID is there
+# too; here it is only a sha256, since some repos that carry this file are public.
+PAYROLL_WORDS = re.compile(r"ฐานเงินเดือน|เงินเดือน|เลขบัญชี|รหัสพนักงาน|เลขประจำตัวประชาชน|ค่าแรง|พนักงาน|"
+                           r"คนงาน|ธนาคาร|\bsalary\b|\bpayroll\b|bank account|\bbytehr\b|hr[ -]sheet", re.I)
+HR_SHEET_SHA256 = {"88df777bedd66e526906986dd27c73278ecc0862d74796ff3f19b63426679373"}
+HR_SHEET_LEN = 44   # a Google Sheet ID
+_ID_RUN = re.compile(r"[A-Za-z0-9_-]{%d,}" % HR_SHEET_LEN)
+
+
+def hr_sheet_id(text):
+    """True when text holds the HR sheet's ID anywhere, even glued to other ID characters (matched by hash)."""
+    for m in _ID_RUN.finditer(text):
+        run = m.group()
+        if len(run) > 3 * HR_SHEET_LEN:   # a long token or base64 run, not an ID in a link or name
+            continue
+        for i in range(len(run) - HR_SHEET_LEN + 1):
+            if hashlib.sha256(run[i:i + HR_SHEET_LEN].encode()).hexdigest() in HR_SHEET_SHA256:
+                return True
+    return False
+
+
+def payroll_marker(text):
+    """True when text holds a payroll word or the HR sheet's ID (matched by its hash)."""
+    return bool(PAYROLL_WORDS.search(text)) or hr_sheet_id(text)
+
+
+# Spreadsheet column names that mean people data, beyond the payroll words.
+HR_HEADERS = re.compile(r"\b(?:employee|staff|worker)[ _-]?(?:id|no|number|code|name)\b|national[ _-]?id|"
+                        r"citizen[ _-]?id|id[ _-]?card|tax[ _-]?id|passport|date[ _-]?of[ _-]?birth|"
+                        r"payslip|บัตรประชาชน|วันเกิด|ชื่อ-?สกุล|ชื่อ-?นามสกุล", re.I)
+BANK_ACCOUNT = re.compile(r"(?<![\d-])\d{3}-\d-\d{5}-\d(?![\d-])")
+# Written the way IDs are printed (1-2345-67890-12-3, or with spaces). email-writing's keep_out.py has a looser
+# rule on purpose (free text, no check digit); this one must not trip on timestamps in data files. A bare 13-digit number is not counted:
+# about 1 in 10 random ones (millisecond timestamps) pass the check digit. A sheet of bare IDs is still caught by
+# its column names (HR_HEADERS) or payroll words.
+THAI_ID = re.compile(r"(?<![\d-])(\d)([- ])(\d{4})\2(\d{5})\2(\d{2})\2(\d)(?![\d-])")
+HR_NAME = re.compile(r"(?:^|[^a-z])(?:hr|bytehr|payroll|employees?|workers?|roster|staff|salary|salaries|payslips?|"
+                     r"wages?)(?:[^a-z]|$)|เงินเดือน|พนักงาน|สลิป", re.I)
+DOC_IMAGE_NAME = re.compile(r"(?<![a-z])(?:scan(?:ned)?|receipts?|invoices?|statements?|id[ _-]?cards?|passports?|"
+                            r"payslips?|contracts?|licen[cs]es?|certificates?|forms?|documents?)(?![a-z])|"
+                            r"ใบ|บัตร|สลิป|สัญญา|เอกสาร", re.I)
+
+
+def _thai_id_ok(digits):
+    """A 13-digit Thai national ID with a valid check digit (so a random 13-digit number rarely counts)."""
+    if len(digits) != 13 or digits[0] == "0":
+        return False
+    total = sum(int(d) * (13 - i) for i, d in enumerate(digits[:12]))
+    return (11 - total % 11) % 10 == int(digits[12])
+
+
+def id_like(text):
+    """True when the text holds a Thai national ID (valid check digit) or a Thai bank account number."""
+    if BANK_ACCOUNT.search(text):
+        return True
+    return any(_thai_id_ok("".join(m.group(1, 3, 4, 5, 6))) for m in THAI_ID.finditer(text))
+
+
+UNREAD = None   # readable_text's answer for a sheet or document whose content it cannot read
+
+
+def decode(data):
+    """Bytes to text: a BOM first, then UTF-8, then UTF-16 when it looks like it, then cp874 (TIS-620, what
+    Thai Excel saves a CSV as), else Latin-1."""
+    if data[:3] == b"\xef\xbb\xbf":
+        return data[3:].decode("utf-8", "replace")
+    if data[:2] in (b"\xff\xfe", b"\xfe\xff"):
+        return data.decode("utf-16", "replace")
+    if len(data) > 3 and data[1:200:2].count(0) > len(data[1:200:2]) * 0.4:   # BOM-less UTF-16LE
+        return data.decode("utf-16-le", "replace")
+    if len(data) > 3 and data[0:200:2].count(0) > len(data[0:200:2]) * 0.4:   # BOM-less UTF-16BE
+        return data.decode("utf-16-be", "replace")
+    try:
+        return data.decode("utf-8")
+    except UnicodeDecodeError:
+        pass
+    try:
+        return data.decode("cp874")
+    except UnicodeDecodeError:
+        return data.decode("latin-1")
+
+
+def _xml_text(data):
+    import html
+    return html.unescape(re.sub(r"<[^>]+>", " ", data.decode("utf-8", "replace")))
+
+
+def readable_text(name, data):
+    """The text a file holds, for the content checks: the XML parts of an .xlsx/.xlsm/.ods/.docx/.pptx/.odt (zip),
+    the strings of an old .xls/.doc/.ppt (best effort), else the bytes decoded (decode()). UNREAD (None) for a sheet
+    or document whose cells cannot be read here: .xlsb and .numbers (binary parts), a PDF (compressed), a zip kind
+    that is not a zip (password-protected) or holds no text. Never raises."""
+    import io
+    import zipfile
+    ext = os.path.splitext(name.lower())[1]
+    if ext in {".xlsb", ".numbers", ".pages", ".key", ".pdf"}:
+        return UNREAD
+    try:
+        if ext in ZIP_TEXT_EXT:
+            if data[:2] != b"PK":
+                return UNREAD
+            parts = []
+            with zipfile.ZipFile(io.BytesIO(data)) as z:
+                for n in z.namelist():
+                    if n.endswith(".xml") and (n.startswith(("xl/", "word/", "ppt/")) or n == "content.xml"):
+                        parts.append(_xml_text(z.read(n)[:20_000_000]))
+            text = " ".join(parts)
+            return text if text.strip() else UNREAD
+        if ext in {".xls", ".doc", ".ppt"}:   # OLE binary: strings are UTF-16LE or Latin-1 (cp874 for Thai)
+            return (data.decode("utf-16-le", "ignore") + " " + data.decode("cp874", "ignore") + " "
+                    + data.decode("latin-1", "ignore"))
+        return decode(data)
+    except Exception:  # noqa: BLE001  a broken zip or file cannot be read
+        return UNREAD
+
+
+def sensitive_reason(path, data, rescue=False):
+    """(kind, reason) when a file must not go into Git, else None. kind:
+      "hr"      ID-like numbers (a printed national ID, a bank account), people-data column names or the HR
+                sheet's ID: never in Git, no allow list;
+      "hrwords" payroll words, or people-data column names below a CSV/TSV's first line: Git only under a
+                "files" entry for that one .csv or .tsv file that also says "hr_words": true (a reviewed prose
+                list, such as dictation phrases that hold the words for wages and birthday);
+      "unread"  a spreadsheet whose cells cannot be read (.xlsb, .numbers, password-protected): Git only under a
+                "files" entry that also says "unreadable": true;
+      "office"  any other binary office file or PDF: Git only under a "files" entry;
+      "image"   an image of a document (rescue only; the commit gate lets images through).
+    rescue=True is a wider net for an agent's untracked files, whose content is unknown: ID-like numbers in any
+    file, payroll words in any data file (not code or docs), HR words in an office file's name, images of
+    documents."""
+    name = os.path.basename(path)
+    ext = os.path.splitext(name.lower())[1]
+    if ext in IMAGE_EXT:
+        if rescue and DOC_IMAGE_NAME.search(name):
+            return ("hr" if HR_NAME.search(name) else "image"), "an image of a document"
+        return None
+    text = readable_text(name, data)
+    seen = text or ""
+    if ext in SHEET_EXT or ext in OFFICE_EXT:
+        # People-data column names anywhere count. In a CSV/TSV, a match below its first line may be prose (a
+        # dictation phrase with the word for birthday), so only there it is "hrwords", which only a reviewed
+        # entry for that one file lets in; in its first line, or anywhere in a workbook, it is people data.
+        first = next((ln for ln in seen.splitlines() if ln.strip()), "") if ext in (".csv", ".tsv") else seen
+        if id_like(seen) or HR_HEADERS.search(first) or hr_sheet_id(seen):
+            return "hr", "a spreadsheet or office file with people data (ID numbers or people-data columns)"
+        if ext in SHEET_EXT and text is UNREAD:
+            return "unread", "a spreadsheet whose cells cannot be read here (it could hold HR data)"
+        if PAYROLL_WORDS.search(seen) or HR_HEADERS.search(seen):
+            return "hrwords", "a spreadsheet or office file with payroll words or people-data column names"
+        if ext in OFFICE_EXT:
+            if rescue and HR_NAME.search(name):
+                return "hrwords", "an office file or PDF named for HR or payroll"
+            return "office", "a binary office file or PDF"
+    if rescue:
+        if id_like(seen):
+            return "hr", "a file with ID-like numbers (a national ID or a bank account)"
+        if ext and ext not in PROSE_EXT and payroll_marker(seen):
+            return "hr", "a data file with payroll or HR words"
+    return None
+
+
+def load_file_allow(text):
+    """(path patterns, problems) from the allow list's "files" entries: [{"path": "^folder/", "reason": "..."}].
+    They let a binary office file or PDF in (samples, fixtures); never one with HR or ID-like content."""
+    if not text:
+        return [], []
+    try:
+        data = json.loads(text)
+    except ValueError:
+        return [], []   # load_allow reports it
+    entries = data.get("files") if isinstance(data, dict) else None
+    if entries is None:
+        return [], []
+    if not isinstance(entries, list):
+        return [], [f"{ALLOW_FILE} \"files\" must be a list; no file entries used"]
+    valid, problems = [], []
+    for i, e in enumerate(entries):
+        path = str((e or {}).get("path") or "") if isinstance(e, dict) else ""
+        reason = str((e or {}).get("reason") or "").strip() if isinstance(e, dict) else ""
+        if len(reason.split()) < 3:
+            problems.append(f"files entry {i}: reason needs 3 or more words; ignored")
+            continue
+        try:
+            re.compile(path)
+        except re.error:
+            problems.append(f"files entry {i}: path is not a valid regular expression; ignored")
+            continue
+        if "|" in path or not re.match(r"\^[A-Za-z0-9_][A-Za-z0-9_./-]{2,}", path):
+            problems.append(f"files entry {i}: path must start with ^ and a literal folder or file name and hold "
+                            "no |; ignored")
+            continue
+        hr_words = e.get("hr_words") is True
+        if hr_words and not re.fullmatch(r"\^(?:[^.*+?()\[\]{}|\\]|\\\.)+\\\.(?:csv|tsv)\$", path):
+            problems.append(f"files entry {i}: \"hr_words\" needs the path of one .csv or .tsv file "
+                            "(^dir/name\\.tsv$); hr_words ignored")
+            hr_words = False
+        valid.append({"i": i, "path": path, "reason": reason, "unreadable": e.get("unreadable") is True,
+                      "hr_words": hr_words})
+    return valid, problems
+
+
+def file_allowed(entry, path, kind):
+    """True when a "files" entry lets a file of this kind in: "hr" never; "hrwords" and "unread" only with their
+    own flag on the entry."""
+    if kind == "hr" or not re.search(entry["path"], path):
+        return False
+    return kind == "office" or (kind == "unread" and entry["unreadable"]) or (kind == "hrwords" and entry["hr_words"])
+
+
+def check_files(files, allow_text, github=False):
+    """files: [(path, bytes)]. Prints each refusal (path and reason only); returns the number refused."""
+    entries, problems = load_file_allow(allow_text)
+    for p in problems:
+        say(f"allow list: {p}")
+    refused = 0
+    for path, data in files:
+        found = sensitive_reason(path, data)
+        if not found:
+            continue
+        kind, reason = found
+        if kind != "hr":
+            entry = next((e for e in entries if file_allowed(e, path, kind)), None)
+            if entry:
+                continue
+        refused += 1
+        tail = {"hr": "; people data never goes into Git", "hrwords": "; payroll data goes to Dropbox, never Git",
+                "unread": f"; not on the \"files\" allow list in {ALLOW_FILE} as unreadable"}
+        say(f"FAIL {path}: {reason}" + tail.get(kind, f"; not on the \"files\" allow list in {ALLOW_FILE}"))
+        if github:
+            print(f"::error file={gh_prop(path)},title=Sensitive file::{gh_escape(reason)}")
+    if refused:
+        say("keep spreadsheets, PDFs, office files and HR data in Dropbox (Agent Backups, bytehr for HR or payroll; "
+            "stay-current --rescue <folder> copies them there with a hash check), never in Git. A sample or fixture "
+            f"office file made of made-up data only: add a \"files\" entry with a reason to {ALLOW_FILE}, reviewed with "
+            "the change. Rule: scripts/secret-scan/README.md "
+            "in nuey-skills. Never --no-verify.")
+    return refused
+
+
+def staged_files(repo, entries):
+    """[(path, bytes)] of the staged blobs worth reading: sheets, office files, PDFs."""
+    out = []
+    for path, sha in entries:
+        ext = os.path.splitext(path.lower())[1]
+        if ext in SHEET_EXT or ext in OFFICE_EXT:
+            r = subprocess.run(["git", "-C", str(repo), "cat-file", "blob", sha], capture_output=True)
+            if r.returncode != 0:
+                raise RuntimeError(f"staged file {path} could not be read from the index")
+            out.append((path, r.stdout))
+    return out
+
+
+def range_files(repo, commits):
+    """[(path, bytes)] of every version of a sheet, office file or PDF that one of commits (the same set the
+    TruffleHog scan judges: on no remote ref for a push, not on the base for CI) added or changed, so one added
+    and removed again inside the range counts. A merge commit counts only for what it changed itself (a conflict
+    resolution: --cc, files that differ from every parent), so merging main never re-judges main's own files."""
+    out, seen = [], set()
+
+    def add(path, blob):
+        if (path, blob) in seen:
+            return
+        seen.add((path, blob))
+        ext = os.path.splitext(path.lower())[1]
+        if ext in SHEET_EXT or ext in OFFICE_EXT:
+            b = subprocess.run(["git", "-C", str(repo), "cat-file", "blob", blob], capture_output=True)
+            if b.returncode != 0:
+                raise RuntimeError(f"{path} could not be read from the commits")
+            out.append((path, b.stdout))
+
+    for c in sorted(commits):
+        r = subprocess.run(["git", "-C", str(repo), "diff-tree", "-r", "-z", "--no-commit-id", "--raw", "--no-abbrev",
+                            "--no-renames", "--root", "--diff-filter=ACMT", c], capture_output=True)
+        if r.returncode != 0:
+            raise RuntimeError(f"could not list the files of {c[:12]}: "
+                               f"{r.stderr.decode('utf-8', 'replace').strip()[:200]}")
+        parts = r.stdout.split(b"\0")
+        for k in range(0, len(parts) - 1, 2):
+            meta = parts[k].decode("ascii", "replace").split()
+            if len(meta) >= 5 and meta[1] in STAGED_FILE_MODES:
+                add(parts[k + 1].decode("utf-8", "surrogateescape"), meta[3])
+        if len(git(repo, "rev-list", "--parents", "-n", "1", c).split()) > 2:   # a merge: its own changes
+            m = subprocess.run(["git", "-C", str(repo), "diff-tree", "-r", "-z", "--cc", "--name-only",
+                                "--no-commit-id", c], capture_output=True)
+            if m.returncode != 0:
+                raise RuntimeError(f"could not list what merge {c[:12]} changed itself")
+            for path in [p.decode("utf-8", "surrogateescape") for p in m.stdout.split(b"\0") if p]:
+                blob = git(repo, "rev-parse", "-q", "--verify", f"{c}:{path}", check=False)
+                if blob:
+                    add(path, blob)
+    return out
+
+
 # --------------------------------------------------------------------------- allow list
 
 
@@ -821,10 +1132,12 @@ def main(argv=None):
             print(ensure_binary())
             return 0
         repo = Path(args.repo).resolve()
+        refused = 0
         if args.staged:
             entries = staged_entries(repo)
             if not entries:
                 return 0
+            refused = check_files(staged_files(repo, entries), read_allow_text(repo, ":"), args.github)
             binary = ensure_binary()
             results = [(scan_staged(binary, repo, entries), read_allow_text(repo, ":"))]
             ranges = []
@@ -841,6 +1154,9 @@ def main(argv=None):
             ranges = [(since, head, added)]
         else:
             ranges = [(None, None, None)]
+        if not args.staged and not args.full:
+            for _since, head, added in ranges:
+                refused += check_files(range_files(repo, added or ()), read_allow_text(repo, head), args.github)
         if not args.staged:
             binary = ensure_binary()
             results = scan_ranges(repo, ranges, binary)
@@ -859,11 +1175,15 @@ def main(argv=None):
     if args.report:
         Path(args.report).write_text(json.dumps({"version": PIN_VERSION, "findings": findings,
                                                  "failing": failing}, indent=1) + "\n", encoding="utf-8")
+    if refused:
+        say(f"{refused} sensitive file(s); refused.")
     if failing:
         say(f"{len(failing)} secret finding(s); refused.")
         advice(failing, staged=args.staged)
         mode = "staged" if args.staged else "pre-push" if args.pre_push else "full" if args.full else "ci"
         hand_off_live(failing, repo, mode)
+        return 1
+    if refused:
         return 1
     if args.staged:
         return 0  # a clean commit stays quiet
