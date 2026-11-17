@@ -627,19 +627,42 @@ def scan_staged(binary, repo, entries, timeout=SCAN_TIMEOUT):
 # (scripts/stay-current/stuck.py) uses the same sensitive_reason() to pick what goes to Dropbox: for tracked files
 # the gate's own answer, for untracked ones a wider net. Only the path and the reason are printed, never a value.
 
-SHEET_EXT = {".xlsx", ".xlsm", ".xlsb", ".xls", ".ods", ".numbers", ".csv", ".tsv"}
-OFFICE_EXT = {".xlsx", ".xlsm", ".xlsb", ".xls", ".ods", ".numbers", ".docx", ".docm", ".doc", ".odt", ".pages",
-              ".rtf", ".pptx", ".ppt", ".odp", ".key", ".pdf"}
+SHEET_EXT = {".xlsx", ".xlsm", ".xltx", ".xltm", ".xlsb", ".xls", ".ods", ".numbers", ".csv", ".tsv"}
+OFFICE_EXT = SHEET_EXT - {".csv", ".tsv"} | {".docx", ".docm", ".dotx", ".dotm", ".doc", ".odt", ".pages", ".rtf",
+                                            ".pptx", ".pptm", ".potx", ".ppsx", ".ppt", ".odp", ".key", ".pdf"}
+ZIP_TEXT_EXT = {".xlsx", ".xlsm", ".xltx", ".xltm", ".ods", ".docx", ".docm", ".dotx", ".dotm", ".odt", ".pptx",
+                ".pptm", ".potx", ".ppsx", ".odp"}
 IMAGE_EXT = {".png", ".jpg", ".jpeg", ".heic", ".heif", ".tif", ".tiff", ".webp", ".bmp", ".gif"}
 # Text kinds where a payroll word is normal prose (docs and code about the HR work); only ID-like numbers count.
 PROSE_EXT = {".md", ".py", ".sh", ".js", ".mjs", ".cjs", ".ts", ".tsx", ".jsx", ".yml", ".yaml", ".toml", ".html",
              ".css", ".swift", ".go", ".rs", ".rb", ".sql", ".ini", ".cfg"}
-# Kept equal to outside_change_check._PAYROLL_MARKERS (nuey-skills scripts/outside-change-check; a test compares
-# them): this file is copied alone into every repo, so it cannot import that one.
-_HR_SHEET_IDS = ("1_Nv_hvs-5E9EdnnzOLymRgeQxlgPOTM1ZuR7__q7n74",)   # FURRINGLINE-HR-Import-Sheets
-PAYROLL_MARKERS = re.compile(r"ฐานเงินเดือน|เงินเดือน|เลขบัญชี|รหัสพนักงาน|เลขประจำตัวประชาชน|ค่าแรง|พนักงาน|"
-                             r"คนงาน|ธนาคาร|\bsalary\b|\bpayroll\b|bank account|\bbytehr\b|hr[ -]sheet|"
-                             + "|".join(map(re.escape, _HR_SHEET_IDS)), re.I)
+# The payroll words of outside_change_check._PAYROLL_MARKERS (nuey-skills scripts/outside-change-check; a test keeps
+# them equal): this file is copied alone into every repo, so it cannot import that one. The HR sheet's ID is there
+# too; here it is only a sha256, since some repos that carry this file are public.
+PAYROLL_WORDS = re.compile(r"ฐานเงินเดือน|เงินเดือน|เลขบัญชี|รหัสพนักงาน|เลขประจำตัวประชาชน|ค่าแรง|พนักงาน|"
+                           r"คนงาน|ธนาคาร|\bsalary\b|\bpayroll\b|bank account|\bbytehr\b|hr[ -]sheet", re.I)
+HR_SHEET_SHA256 = {"88df777bedd66e526906986dd27c73278ecc0862d74796ff3f19b63426679373"}
+HR_SHEET_LEN = 44   # a Google Sheet ID
+_ID_RUN = re.compile(r"[A-Za-z0-9_-]{%d,}" % HR_SHEET_LEN)
+
+
+def hr_sheet_id(text):
+    """True when text holds the HR sheet's ID anywhere, even glued to other ID characters (matched by hash)."""
+    for m in _ID_RUN.finditer(text):
+        run = m.group()
+        if len(run) > 3 * HR_SHEET_LEN:   # a long token or base64 run, not an ID in a link or name
+            continue
+        for i in range(len(run) - HR_SHEET_LEN + 1):
+            if hashlib.sha256(run[i:i + HR_SHEET_LEN].encode()).hexdigest() in HR_SHEET_SHA256:
+                return True
+    return False
+
+
+def payroll_marker(text):
+    """True when text holds a payroll word or the HR sheet's ID (matched by its hash)."""
+    return bool(PAYROLL_WORDS.search(text)) or hr_sheet_id(text)
+
+
 # Spreadsheet column names that mean people data, beyond the payroll words.
 HR_HEADERS = re.compile(r"\b(?:employee|staff|worker)[ _-]?(?:id|no|number|code|name)\b|national[ _-]?id|"
                         r"citizen[ _-]?id|id[ _-]?card|tax[ _-]?id|passport|date[ _-]?of[ _-]?birth|"
@@ -712,7 +735,7 @@ def readable_text(name, data):
     if ext in {".xlsb", ".numbers", ".pages", ".key", ".pdf"}:
         return UNREAD
     try:
-        if ext in {".xlsx", ".xlsm", ".ods", ".docx", ".docm", ".odt", ".pptx", ".odp"}:
+        if ext in ZIP_TEXT_EXT:
             if data[:2] != b"PK":
                 return UNREAD
             parts = []
@@ -731,13 +754,19 @@ def readable_text(name, data):
 
 
 def sensitive_reason(path, data, rescue=False):
-    """(kind, reason) when a file must not go into Git, else None. kind: "hr" (payroll, HR or ID-like content:
-    never in Git, no allow list), "unread" (a spreadsheet whose cells cannot be read, .xlsb, .numbers or
-    password-protected: Git only under a "files" entry that also says "unreadable": true), "office" (a binary
-    office file or PDF: Git only when allow-listed), "image" (an image of a document; rescue only, the commit gate lets images
-    through). rescue=True is a wider net for an agent's unplaced files, whose content is unknown: ID-like numbers
-    in any file, payroll words in any data file (not code or docs), HR words in an office file's name, images of
-    documents. Everything the gate refuses the rescue takes too, so after a rescue the gate passes."""
+    """(kind, reason) when a file must not go into Git, else None. kind:
+      "hr"      ID-like numbers (a printed national ID, a bank account), people-data column names or the HR
+                sheet's ID: never in Git, no allow list;
+      "hrwords" payroll words, or people-data column names below a CSV/TSV's first line: Git only under a
+                "files" entry for that one .csv or .tsv file that also says "hr_words": true (a reviewed prose
+                list, such as dictation phrases that hold the words for wages and birthday);
+      "unread"  a spreadsheet whose cells cannot be read (.xlsb, .numbers, password-protected): Git only under a
+                "files" entry that also says "unreadable": true;
+      "office"  any other binary office file or PDF: Git only under a "files" entry;
+      "image"   an image of a document (rescue only; the commit gate lets images through).
+    rescue=True is a wider net for an agent's untracked files, whose content is unknown: ID-like numbers in any
+    file, payroll words in any data file (not code or docs), HR words in an office file's name, images of
+    documents."""
     name = os.path.basename(path)
     ext = os.path.splitext(name.lower())[1]
     if ext in IMAGE_EXT:
@@ -746,21 +775,25 @@ def sensitive_reason(path, data, rescue=False):
         return None
     text = readable_text(name, data)
     seen = text or ""
-    if ext in SHEET_EXT:
-        if text is UNREAD:
+    if ext in SHEET_EXT or ext in OFFICE_EXT:
+        # People-data column names anywhere count. In a CSV/TSV, a match below its first line may be prose (a
+        # dictation phrase with the word for birthday), so only there it is "hrwords", which only a reviewed
+        # entry for that one file lets in; in its first line, or anywhere in a workbook, it is people data.
+        first = next((ln for ln in seen.splitlines() if ln.strip()), "") if ext in (".csv", ".tsv") else seen
+        if id_like(seen) or HR_HEADERS.search(first) or hr_sheet_id(seen):
+            return "hr", "a spreadsheet or office file with people data (ID numbers or people-data columns)"
+        if ext in SHEET_EXT and text is UNREAD:
             return "unread", "a spreadsheet whose cells cannot be read here (it could hold HR data)"
-        if PAYROLL_MARKERS.search(seen) or HR_HEADERS.search(seen) or id_like(seen):
-            return "hr", "a spreadsheet with HR, payroll or ID-like content"
-    if ext in OFFICE_EXT:
-        if HR_HEADERS.search(seen) or id_like(seen):
-            return "hr", "an office file with HR or ID-like content"
-        if rescue and (HR_NAME.search(name) or PAYROLL_MARKERS.search(seen)):
-            return "hr", "an office file or PDF named for or holding HR or payroll data"
-        return "office", "a binary office file or PDF"
+        if PAYROLL_WORDS.search(seen) or HR_HEADERS.search(seen):
+            return "hrwords", "a spreadsheet or office file with payroll words or people-data column names"
+        if ext in OFFICE_EXT:
+            if rescue and HR_NAME.search(name):
+                return "hrwords", "an office file or PDF named for HR or payroll"
+            return "office", "a binary office file or PDF"
     if rescue:
         if id_like(seen):
             return "hr", "a file with ID-like numbers (a national ID or a bank account)"
-        if ext and ext not in PROSE_EXT and PAYROLL_MARKERS.search(seen):   # no extension: a script, like code
+        if ext and ext not in PROSE_EXT and payroll_marker(seen):
             return "hr", "a data file with payroll or HR words"
     return None
 
@@ -795,8 +828,22 @@ def load_file_allow(text):
             problems.append(f"files entry {i}: path must start with ^ and a literal folder or file name and hold "
                             "no |; ignored")
             continue
-        valid.append({"i": i, "path": path, "reason": reason, "unreadable": e.get("unreadable") is True})
+        hr_words = e.get("hr_words") is True
+        if hr_words and not re.fullmatch(r"\^(?:[^.*+?()\[\]{}|\\]|\\\.)+\\\.(?:csv|tsv)\$", path):
+            problems.append(f"files entry {i}: \"hr_words\" needs the path of one .csv or .tsv file "
+                            "(^dir/name\\.tsv$); hr_words ignored")
+            hr_words = False
+        valid.append({"i": i, "path": path, "reason": reason, "unreadable": e.get("unreadable") is True,
+                      "hr_words": hr_words})
     return valid, problems
+
+
+def file_allowed(entry, path, kind):
+    """True when a "files" entry lets a file of this kind in: "hr" never; "hrwords" and "unread" only with their
+    own flag on the entry."""
+    if kind == "hr" or not re.search(entry["path"], path):
+        return False
+    return kind == "office" or (kind == "unread" and entry["unreadable"]) or (kind == "hrwords" and entry["hr_words"])
 
 
 def check_files(files, allow_text, github=False):
@@ -810,15 +857,14 @@ def check_files(files, allow_text, github=False):
         if not found:
             continue
         kind, reason = found
-        if kind in ("office", "unread"):
-            entry = next((e for e in entries if re.search(e["path"], path)
-                          and (kind == "office" or e["unreadable"])), None)
+        if kind != "hr":
+            entry = next((e for e in entries if file_allowed(e, path, kind)), None)
             if entry:
                 continue
         refused += 1
-        say(f"FAIL {path}: {reason}" + ("; HR and ID data never go into Git" if kind == "hr" else
-                                        f"; not on the \"files\" allow list in {ALLOW_FILE}"
-                                        + (" with \"unreadable\": true" if kind == "unread" else "")))
+        tail = {"hr": "; people data never goes into Git", "hrwords": "; payroll data goes to Dropbox, never Git",
+                "unread": f"; not on the \"files\" allow list in {ALLOW_FILE} as unreadable"}
+        say(f"FAIL {path}: {reason}" + tail.get(kind, f"; not on the \"files\" allow list in {ALLOW_FILE}"))
         if github:
             print(f"::error file={gh_prop(path)},title=Sensitive file::{gh_escape(reason)}")
     if refused:
@@ -846,9 +892,21 @@ def staged_files(repo, entries):
 def range_files(repo, commits):
     """[(path, bytes)] of every version of a sheet, office file or PDF that one of commits (the same set the
     TruffleHog scan judges: on no remote ref for a push, not on the base for CI) added or changed, so one added
-    and removed again inside the range counts. A merge commit shows no diff of its own, and main's commits are not
-    in the set, so merging main never re-judges main's files."""
+    and removed again inside the range counts. A merge commit counts only for what it changed itself (a conflict
+    resolution: --cc, files that differ from every parent), so merging main never re-judges main's own files."""
     out, seen = [], set()
+
+    def add(path, blob):
+        if (path, blob) in seen:
+            return
+        seen.add((path, blob))
+        ext = os.path.splitext(path.lower())[1]
+        if ext in SHEET_EXT or ext in OFFICE_EXT:
+            b = subprocess.run(["git", "-C", str(repo), "cat-file", "blob", blob], capture_output=True)
+            if b.returncode != 0:
+                raise RuntimeError(f"{path} could not be read from the commits")
+            out.append((path, b.stdout))
+
     for c in sorted(commits):
         r = subprocess.run(["git", "-C", str(repo), "diff-tree", "-r", "-z", "--no-commit-id", "--raw", "--no-abbrev",
                             "--no-renames", "--root", "--diff-filter=ACMT", c], capture_output=True)
@@ -858,16 +916,17 @@ def range_files(repo, commits):
         parts = r.stdout.split(b"\0")
         for k in range(0, len(parts) - 1, 2):
             meta = parts[k].decode("ascii", "replace").split()
-            path = parts[k + 1].decode("utf-8", "surrogateescape")
-            if len(meta) < 5 or meta[1] not in STAGED_FILE_MODES or (path, meta[3]) in seen:
-                continue
-            seen.add((path, meta[3]))
-            ext = os.path.splitext(path.lower())[1]
-            if ext in SHEET_EXT or ext in OFFICE_EXT:
-                b = subprocess.run(["git", "-C", str(repo), "cat-file", "blob", meta[3]], capture_output=True)
-                if b.returncode != 0:
-                    raise RuntimeError(f"{path} could not be read from the commits")
-                out.append((path, b.stdout))
+            if len(meta) >= 5 and meta[1] in STAGED_FILE_MODES:
+                add(parts[k + 1].decode("utf-8", "surrogateescape"), meta[3])
+        if len(git(repo, "rev-list", "--parents", "-n", "1", c).split()) > 2:   # a merge: its own changes
+            m = subprocess.run(["git", "-C", str(repo), "diff-tree", "-r", "-z", "--cc", "--name-only",
+                                "--no-commit-id", c], capture_output=True)
+            if m.returncode != 0:
+                raise RuntimeError(f"could not list what merge {c[:12]} changed itself")
+            for path in [p.decode("utf-8", "surrogateescape") for p in m.stdout.split(b"\0") if p]:
+                blob = git(repo, "rev-parse", "-q", "--verify", f"{c}:{path}", check=False)
+                if blob:
+                    add(path, blob)
     return out
 
 
