@@ -5,16 +5,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "grep -qs 'parallel-work skill first' \"$HOME/.codex/hooks.json\" || printf '%s' '{\"hookSpecificOutput\":{\"hookEventName\":\"UserPromptSubmit\",\"additionalContext\":\"Multi-step task (build, design, research, setup)? Load the parallel-work skill first, list the workstreams, and run independent ones in parallel with subagents.\"}}'",
-            "timeout": 5
-          }
-        ]
-      },
-      {
-        "hooks": [
-          {
-            "type": "command",
-            "command": "grep -qs 'jev-integration-check skill' \"$HOME/.codex/hooks.json\" || printf '%s' '{\"hookSpecificOutput\":{\"hookEventName\":\"UserPromptSubmit\",\"additionalContext\":\"Planning, designing or building something, or changing a workflow? Load the jev-integration-check skill: find where Jev (TypeSafe) judgments could help, then decide use, not now, or no, with a reason.\"}}'",
+            "command": "grep -qs 'Before a build, design, research' \"$HOME/.codex/hooks.json\" || printf '%s' '{\"hookSpecificOutput\": {\"hookEventName\": \"UserPromptSubmit\", \"additionalContext\": \"Before a build, design, research, setup or workflow change: load parallel-work, jev-integration-check, start-now and architecture (build one system) first; read the LESSONS.md rows for your area; check MAPS.md before a setup fact. UI or visual: design-workflow. Explaining an idea: show-me.\"}}'",
             "timeout": 5
           }
         ]
