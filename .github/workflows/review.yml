@@ -947,11 +947,11 @@ jobs:
                                added 2026-11-18), only while its plan has room
             4. hello-ultra     hello@furringline.com's own Ultra plan (CLAUDE_CODE_OAUTH_TOKEN_HELLO_ULTRA, added 2026-11-18),
                                only while its plan has room
-            5. nueydaddy       nueydaddy@gmail.com's own Ultra plan (CLAUDE_CODE_OAUTH_TOKEN_NUEYDADDY, added 2026-11-18),
+            5. nueydaddy       the NueyDaddy account's own Ultra plan (CLAUDE_CODE_OAUTH_TOKEN_NUEYDADDY, added 2026-11-18),
                                only while its plan has room
-            6. agents-team     agents@furringline.com's Premium seat in the FURRINGLINE Team
-                               (CLAUDE_CODE_OAUTH_TOKEN_AGENTS_TEAM, added 2026-11-18), only while its plan has room
-            7. agents-ultra    agents@furringline.com's own Ultra plan (CLAUDE_CODE_OAUTH_TOKEN_AGENTS_ULTRA, added 2026-11-18),
+            6. agents-team     the agents account's Premium seat in the FURRINGLINE Team (CLAUDE_CODE_OAUTH_TOKEN_AGENTS_TEAM,
+                               added 2026-11-18), only while its plan has room
+            7. agents-ultra    the agents account's own Ultra plan (CLAUDE_CODE_OAUTH_TOKEN_AGENTS_ULTRA, added 2026-11-18),
                                only while its plan has room
             8. personal        personal plan token (CLAUDE_CODE_OAUTH_TOKEN), only while its plan has room
             9. console-work    work Console API key (ANTHROPIC_API_KEY_CONSOLE_WORK), monthly API credits
