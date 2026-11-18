@@ -34,10 +34,10 @@ from the index (the version being committed), the push and CI scans from the com
 download runs) into a private temp folder and runs `trufflehog filesystem` on it: `trufflehog git` has
 no staged option. The temp folder is removed afterwards.
 
-Every scan also runs our own check for the exact shapes of GitHub's tokens (GITHUB_TOKEN_PATTERN, 2026-11-17):
-TruffleHog drops a GitHub token whose text holds an English word, so a token it did not report goes back to
-TruffleHog alone with its word filter off (filtered_unverified), so its live check decides; no answer is unknown and
-fails. key-guard reads the same pattern from this file (one list).
+TruffleHog's word filter is off (results filtered_unverified, 2026-11-18): it dropped an unconfirmed match whose
+text holds an English word, for every key type. Every scan also runs our own check for the exact shapes of GitHub's
+tokens (GITHUB_TOKEN_PATTERN, 2026-11-17): a token TruffleHog did not report goes back to TruffleHog alone, so its
+live check decides; no answer is unknown and fails. key-guard reads the same pattern from this file (one list).
 
 Exit 0 clean (or nothing to scan), 1 a finding, 2 the scan could not run (the caller refuses).
 Standard library only; Python 3.9+.
@@ -430,9 +430,16 @@ def parse_findings(stdout, base_dir=None, all_results=False):
     return findings
 
 
+# Every result type, the word filter off too (filtered_unverified, 2026-11-18): TruffleHog drops an unconfirmed
+# match whose text holds a word from its false-positive lists (trufflehog#5572), for every detector. A live key is
+# never dropped (the filter skips verified results), so the push and CI scans gain the unknown ones (a live check
+# that failed); the commit scan gains every one. Measured before it went live: scripts/secret-scan/README.md.
+RESULTS = "--results=verified,unknown,unverified,filtered_unverified"
+
+
 def scan_cmd(binary, repo, since=None, head=None):
     cmd = [binary, "git", f"file://{Path(repo).resolve()}", "--json", "--no-update", "--no-ignore-tag",
-           "--results=verified,unknown,unverified", "--fail", "--fail-on-scan-errors"]
+           RESULTS, "--fail", "--fail-on-scan-errors"]
     if since:
         cmd.append(f"--since-commit={since}")
     if head:
@@ -529,8 +536,9 @@ def run_trufflehog(binary, repo, since=None, head=None, timeout=SCAN_TIMEOUT):
 # TruffleHog drops a Github match whose text holds an English word (its false-positive word list): about 3 random
 # tokens in 1,000 hold one ("role", "byte", "part", "merit"), and such a token is missed on every scan, live check or
 # not (lessons/2026-11-17-trufflehog-misses-github-tokens-holding-a-word.md in nuey-skills). So every scan also looks for
-# the exact shapes of GitHub's tokens itself. A hit TruffleHog reported in any status keeps TruffleHog's verdict. For
-# one it did not report, TruffleHog is asked once more with its word filter off (results filtered_unverified) on just
+# the exact shapes of GitHub's tokens itself; the scans now turn that filter off (RESULTS, 2026-11-18), and this check
+# stays for the gaps TruffleHog still has (a stateless token it cuts short) and costs nothing. A hit TruffleHog
+# reported in any status keeps TruffleHog's verdict. For one it did not report, TruffleHog is asked once more on just
 # those values, so the live check still decides: live fails, dead passes the push and CI scans like any dead key, and
 # no answer is "unknown", which fails. key-guard (scripts/key-guard/key_guard.py) reads this pattern from between the
 # two marker lines: keep it one string literal.
@@ -709,9 +717,8 @@ def shape_verdicts(binary, values, timeout=SCAN_TIMEOUT):
         os.mkdir(folder, 0o700)
         with open(os.path.join(folder, "values.txt"), "w", encoding="ascii") as fh:
             fh.write("".join(f"{v}\n" for v in sorted(set(values))))
-        cmd = [c if not c.startswith("--results=") else c + ",filtered_unverified" for c in fs_scan_cmd(binary, folder)]
         try:
-            out = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+            out = subprocess.run(fs_scan_cmd(binary, folder), capture_output=True, text=True, timeout=timeout)
         except (OSError, subprocess.SubprocessError):
             return {}
     if out.returncode not in (0, FAIL_EXIT):
@@ -801,7 +808,7 @@ def export_blobs(repo, entries, dest):
 
 def fs_scan_cmd(binary, folder):
     return [binary, "filesystem", str(folder), "--json", "--no-update", "--no-ignore-tag",
-            "--results=verified,unknown,unverified", "--fail", "--fail-on-scan-errors"]
+            RESULTS, "--fail", "--fail-on-scan-errors"]
 
 
 def scan_staged(binary, repo, entries, timeout=SCAN_TIMEOUT):
