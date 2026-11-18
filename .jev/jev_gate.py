@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
 """jev-gate: a Jev (TypeSafe System One) pass/fail check for code changes.
 
-One script, three layers: the CI job (--mode ci), the git pre-push hook
-(--mode pre-push) and agent Stop hooks (--mode stop). It collects the diff,
+One script: the CI job (--mode ci) and the git pre-push hook (--mode pre-push).
+--mode stop is the manual readiness probe, and the Cursor turn-end check where
+a clone has no Jev pre-push (--only-without-pre-push; the Claude Code and Codex
+Stop hooks were retired 2026-11-18). It collects the diff,
 runs an exact regex secret scan in code, asks Jev a few narrow yes/no (Noul)
 questions about the change, and turns the probabilities into a verdict:
 
@@ -17,7 +19,7 @@ a copy in .jev/jev_gate.py that install.py keeps up to date.
 """
 from __future__ import annotations
 
-VERSION = "0.1.13"
+VERSION = "0.1.14"
 
 import argparse
 import concurrent.futures
@@ -253,6 +255,36 @@ def git_try(repo, *args):
     proc = subprocess.run(["git", "-C", str(repo), "-c", "core.quotepath=off", *args],
                           capture_output=True, text=True, encoding="utf-8", errors="replace")
     return proc.stdout if proc.returncode == 0 else None
+
+
+PRE_PUSH_MARK = "# >>> jev-gate >>>"
+
+
+def pre_push_runs_gate(repo):
+    """True when a push from this clone runs the Jev pre-push review (0.1.14, 2026-11-18): git's hooks folder
+    (core.hooksPath, else .git/hooks) holds an executable pre-push with the jev-gate block or one that runs
+    .githooks/pre-push, itself or in the folder Cursor's hook runner chains to (.cursor-original-hooks-path)."""
+    def runs(folder):
+        hook = os.path.join(folder, "pre-push")
+        try:
+            with open(hook, encoding="utf-8", errors="replace") as fh:
+                text = fh.read()
+        except OSError:
+            return False
+        return os.access(hook, os.X_OK) and (PRE_PUSH_MARK in text or ".githooks/pre-push" in text)
+
+    hooks = (git_try(repo, "rev-parse", "--git-path", "hooks") or "").strip()
+    if not hooks:
+        return False
+    folder = os.path.join(repo, hooks)  # an absolute hooks path stays as it is
+    if runs(folder):
+        return True
+    try:
+        with open(os.path.join(folder, ".cursor-original-hooks-path"), encoding="utf-8") as fh:
+            chained = fh.read().strip()
+    except OSError:
+        return False
+    return bool(chained) and runs(os.path.join(repo, chained))
 
 
 def is_commit(repo, ref):
@@ -1309,6 +1341,8 @@ def parse_args(argv):
     ap.add_argument("--require-review", action="store_true",
                     help="require fresh complete review of applicable changes; empty/excluded-only changes are not applicable; implies --no-cache")
     ap.add_argument("--cursor", action="store_true", help="stop mode: Cursor hook output format")
+    ap.add_argument("--only-without-pre-push", action="store_true",
+                    help="stop mode: skip when this clone's pushes already run the Jev pre-push review")
     ap.add_argument("--repo", help="repository directory (default: current directory)")
     ap.add_argument("hook_args", nargs="*", help=argparse.SUPPRESS)  # pre-push passes remote name/url
     return ap.parse_args(argv)
@@ -1373,6 +1407,10 @@ def run(args):
             return 0
         return 1 if args.require_model or args.require_review else 0
     repo = top.strip()
+    if mode == "stop" and args.only_without_pre_push and pre_push_runs_gate(repo):
+        print("jev-gate: this clone's pre-push runs the Jev review; turn-end check skipped.", file=out)
+        print("{}")
+        return 0
 
     key, credential_source = load_credential()
     network_secret = not key and mode != "ci" and claude_cloud()
