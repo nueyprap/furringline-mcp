@@ -17,7 +17,7 @@ a copy in .jev/jev_gate.py that install.py keeps up to date.
 """
 from __future__ import annotations
 
-VERSION = "0.1.12"
+VERSION = "0.1.13"
 
 import argparse
 import concurrent.futures
@@ -353,7 +353,33 @@ def push_base(repo, remote_sha, local_sha):
     return main, main, [remote, main]   # log: only what this push adds, so an earlier override never counts
 
 
+FETCH_TIMEOUT_S = 8
+
+
+def refresh_default_remote(repo, timeout=FETCH_TIMEOUT_S):
+    """Fetch the remote default branch so origin/<default> is current; ignore any failure.
+
+    A stale origin/main makes `log local --not <merge base>` list main's newer commits (and their
+    Jev-Override trailers) as if this push added them. Offline, slow or no remote: carry on with what we have.
+    """
+    ref = default_remote_ref(repo)
+    if not ref or "/" not in ref:
+        return False
+    remote, branch = ref.split("/", 1)
+    env = {**os.environ, "GIT_TERMINAL_PROMPT": "0",
+           "GIT_SSH_COMMAND": os.environ.get("GIT_SSH_COMMAND", "ssh") + " -o BatchMode=yes -o ConnectTimeout=5"}
+    try:
+        proc = subprocess.run(["git", "-C", str(repo), "fetch", "--quiet", "--no-tags", "--no-write-fetch-head",
+                               remote, f"+refs/heads/{branch}:refs/remotes/{remote}/{branch}"],
+                              capture_output=True, text=True, timeout=timeout, env=env, stdin=subprocess.DEVNULL)
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return proc.returncode == 0
+
+
 def collect_pre_push(repo, stdin_text, base_override=None, strict=False):
+    if not base_override:
+        refresh_default_remote(repo)
     ranges = []   # (diff base, head, rules base, log exclusions)
     for line in stdin_text.splitlines():
         parts = line.split()
