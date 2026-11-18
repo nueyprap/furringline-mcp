@@ -953,12 +953,14 @@ jobs:
                                added 2026-11-18), only while its plan has room
             7. agents-ultra    the agents account's own Ultra plan (CLAUDE_CODE_OAUTH_TOKEN_AGENTS_ULTRA, added 2026-11-18),
                                only while its plan has room
-            8. personal        personal plan token (CLAUDE_CODE_OAUTH_TOKEN), only while its plan has room
+            8. personal        personal plan token (CLAUDE_CODE_OAUTH_TOKEN), last of the plan keys, only while its weekly use
+                               is under its weekly line (below)
             9. console-work    work Console API key (ANTHROPIC_API_KEY_CONSOLE_WORK), monthly API credits
            10. console         personal Console API key (ANTHROPIC_API_KEY_CONSOLE)
            11. team-extra      team account token with extra usage (skipped when the seat has extra usage off)
            12. personal-extra  personal plan token with extra usage, last
           A key whose secret is empty or missing is skipped with a note, so the chain works before every secret is set.
+          personal-extra always runs last, even when CLAUDE_KEY_CHAIN names it earlier.
           GitHub Actions has no plans.json, so this list names the accounts itself; on a Mac the one list is
           scripts/accounts/plans.json (claude_accounts.py, 2026-11-18).
 
@@ -974,13 +976,27 @@ jobs:
           Status `allowed_warning` (only near a limit) still counts as room; the cap decides.
           An `extra` key is skipped only when the meter says extra usage is turned off.
 
+          Personal's weekly line (Narathip, 2026-11-18). A run here cannot be stopped partway, and only the personal account has
+          extra usage on, so personal's own Haiku meter read (the one above: weekly use and its reset time, no other read) also
+          decides by a line that grows through its week. Personal runs only while weekly use is under the line minus 3 points
+          (1 point in the last 5 hours before its reset), never at or above 98% and never while extra usage is in use; a reading
+          with no weekly use or reset time counts as no room. The line, from its last weekly reset: 0% for 2 days, then 0 to 50%
+          by day 4, 50 to 80% by day 6, 80 to 90% by 5 hours before the reset, 90 to 98% at the reset (a Thursday 13:00 reset:
+          Sunday 13:00 25%, Monday 13:00 50%, Tuesday 13:00 65%, Wednesday 13:00 80%, Thursday 08:00 90%). Its 5-hour window
+          keeps the 97% cap (EXTRA_ON_CAP). personal-extra runs only once personal's plan itself is out (limit reached or
+          extra usage already in use), because before that a run would spend the same weekly use past the line; when it runs, the
+          log and step summary say so with a warning.
+
           The next key runs when one ends on a usage limit, a credit or sign-in failure, or with no turns.
           Any other failure stops the chain, so a broken prompt never spends every key.
 
           Change the order with CLAUDE_KEY_CHAIN (comma list; repository or organisation variable). An
           entry is a name above, or `name:ENV_VAR:plan|api[:room|extra]` for a new account; the workflow must
-          then pass ENV_VAR as an env line. KEY_ROOM_CAP (default 0.97) is the meter share at which a
-          `room` key is skipped.
+          then pass ENV_VAR as an env line. KEY_ROOM_CAP (default 1.0, since 2026-11-18: no other plan key has extra usage on) is
+          the meter share at which a `room` key is skipped. A key that can bill extra usage keeps EXTRA_ON_CAP (97%): personal
+          always (plus its weekly line), any other key whose meter does not say extra usage is off (overageStatus rejected).
+          A key that ends on a limit partway may leave half-made work: run(before_retry=) lets the caller undo it before the next
+          key runs (the fix agents restore their worktree).
 
           Cost log (Narathip, 2026-10-27: "make the GitHub review and fix bots log their cost and which account they
           used"): after every Claude Code run in GitHub Actions, one line goes to the run log, the step summary and the
@@ -1035,6 +1051,14 @@ jobs:
           PRICES = {"opus": (4, 20, 0.20, 5), "fable": (10, 50, 0.25, 12.5), "sonnet": (2, 10, 0.20, 2.5),
                     "haiku": (0.10, 0.50, 0.01, 0.125)}
           TOKEN_FIELDS = ("inputTokens", "outputTokens", "cacheReadInputTokens", "cacheCreationInputTokens")
+          PERSONAL = "personal"            # the account behind the `personal` and `personal-extra` keys
+          EXTRA_ON_CAP = 0.97               # the cap of a key that can bill extra usage: personal, or a meter whose extra usage is not off
+          PERSONAL_TOP = 0.98               # personal never runs at or above this share of its week
+          DAY, HOUR = 86400, 3600
+          WEEK_S = 7 * DAY
+          # Personal's weekly line (Narathip, 2026-11-18): (seconds since its last weekly reset, share of the week), linear between.
+          PERSONAL_LINE = ((0, 0.0), (2 * DAY, 0.0), (4 * DAY, 0.50), (6 * DAY, 0.80), (WEEK_S - 5 * HOUR, 0.90), (WEEK_S, 0.98))
+          LATE_S = 5 * HOUR                 # the last hours before the reset, when the margin under the line is 1 point, not 3
           ACCOUNTS = {"team": "team", "team-extra": "team", "work": "work", "hello-team": "hello-team",
                       "hello-ultra": "hello-ultra", "nueydaddy": "nueydaddy", "agents-team": "agents-team",
                       "agents-ultra": "agents-ultra", "personal": "personal",
@@ -1061,7 +1085,16 @@ jobs:
                       out.append(dict(KEYS[raw], name=raw))
                   else:
                       raise ValueError(f"unknown key {raw!r} in CLAUDE_KEY_CHAIN (known: {', '.join(KEYS)})")
-              return out
+              return [e for e in out if not personal_extra(e)] + [e for e in out if personal_extra(e)]  # personal-extra last
+
+
+          def is_personal(entry: dict) -> bool:
+              """Whether a chain entry runs on the personal account (the `personal` and `personal-extra` keys)."""
+              return ACCOUNTS.get(entry.get("name")) == PERSONAL
+
+
+          def personal_extra(entry: dict) -> bool:
+              return is_personal(entry) and entry.get("check") == "extra"
 
 
           def read_meter(token: str, claude: str = "claude", runner=subprocess.run, environ=None) -> dict:
@@ -1105,7 +1138,7 @@ jobs:
                       break
                   return {"status": info.get("status"), "overage": info.get("isUsingOverage") is True,
                           "overage_status": info.get("overageStatus"), "week": num("seven_day"),
-                          "five_hour": num("five_hour")}
+                          "five_hour": num("five_hour"), "week_reset": (w.get("seven_day") or {}).get("resetsAt")}
               why = (last or (p.stderr or "")[-200:] or "no rate_limit_event").replace(token, "[key]").strip()
               return {"error": "meter read failed: " + " ".join(why.split())[:120]}
 
@@ -1130,6 +1163,54 @@ jobs:
                   if v is not None and v >= cap:
                       return f"{label} meter at {round(v * 100)}% (cap {round(cap * 100)}%)"
               return ""
+
+
+          def personal_line(week_reset, now: float):
+              """Personal's weekly line at `now`: the share of its week (0 to 0.98) agents may have used by then, from its next
+              weekly reset (epoch s). None when the reset is unknown or not within the week ahead."""
+              try:
+                  left = float(week_reset) - now
+              except (TypeError, ValueError):
+                  return None
+              if not 0 < left <= WEEK_S:
+                  return None
+              t = WEEK_S - left
+              for (t0, v0), (t1, v1) in zip(PERSONAL_LINE, PERSONAL_LINE[1:]):
+                  if t <= t1:
+                      return v0 + (v1 - v0) * (t - t0) / (t1 - t0)
+              return PERSONAL_LINE[-1][1]
+
+
+          def line_reason(meter: dict, now: float) -> str:
+              """'' when personal's weekly use is under its line (minus 3 points; 1 point in the last 5 hours before its reset),
+              else why personal is skipped. Never at or above 98%, never while extra usage is in use, never on an unknown reading."""
+              if meter.get("error"):
+                  return meter["error"]
+              if meter.get("overage"):
+                  return "extra usage already in use"
+              week = meter.get("week")
+              if not isinstance(week, (int, float)):
+                  return "weekly use unknown"
+              if week >= PERSONAL_TOP:
+                  return f"weekly use {week * 100:.0f}%, at or over {PERSONAL_TOP * 100:.0f}%"
+              line = personal_line(meter.get("week_reset"), now)
+              if line is None:
+                  return "weekly reset time unknown"
+              margin = 0.01 if float(meter["week_reset"]) - now <= LATE_S else 0.03
+              if week >= line - margin:
+                  return (f"weekly use {week * 100:.0f}%, its line now {line * 100:.0f}% "
+                          f"(runs only under {max(line - margin, 0) * 100:.0f}%)")
+              return ""
+
+
+          def out_reason(meter: dict) -> str:
+              """'' when personal's plan itself is out (its limit reached or extra usage already in use), so personal-extra
+              bills extra usage only; else why personal-extra is skipped: a run would spend the weekly use its line protects."""
+              if meter.get("error"):
+                  return meter["error"]
+              if meter.get("overage") or meter.get("status") not in ("allowed", "allowed_warning"):
+                  return ""
+              return "its plan is not out, so a run would spend its weekly use past its line"
 
 
           def should_fall_back(res: dict) -> bool:
@@ -1250,16 +1331,30 @@ jobs:
               return why
 
 
-          def run(cmd: list, environ=None, runner=None, meter=None, say=print, cwd=None, log=None) -> dict:
+          def loud(text: str, environ: dict, say=print) -> None:
+              """A warning that shows on the GitHub run page (annotation) and in its step summary."""
+              say(f"::warning title=Extra usage::key-chain: {text}")
+              if environ.get("GITHUB_STEP_SUMMARY"):
+                  try:
+                      with open(environ["GITHUB_STEP_SUMMARY"], "a") as f:
+                          f.write(f"\n**Extra usage:** key-chain: {text}\n")
+                  except OSError:
+                      pass
+
+
+          def run(cmd: list, environ=None, runner=None, meter=None, say=print, cwd=None, log=None, now=None,
+                  before_retry=None) -> dict:
               """Try each key in order; the last result, with `key` (the one that ran) and `tried` (one line per key).
-              Each Claude call is passed to log(row); with the real runner the default is report()."""
+              Each Claude call is passed to log(row); with the real runner the default is report(). now: the clock for
+              personal's weekly line (tests). before_retry(): called before a key runs after an earlier key's run fell back,
+              so a caller can undo what that run left half-done."""
               if log is None and runner is None:
                   def log(row):
                       report(row, environ, say=say)
               runner = runner or run_claude
               environ = dict(os.environ if environ is None else environ)
               meter = meter or (lambda token: read_meter(token, cmd[0] if cmd else "claude", environ=environ))
-              cap = float(environ.get("KEY_ROOM_CAP") or 0.97)
+              cap = float(environ.get("KEY_ROOM_CAP") or 1.0)
               entries = chain(environ)
               tried, res = [], None
               for i, e in enumerate(entries):
@@ -1271,11 +1366,22 @@ jobs:
                       t0 = time.time()
                       m = meter(token)
                       say(f"key-chain: {e['name']} meter read in {time.time() - t0:.0f} s")
-                      why = room_reason(m, cap) if e["check"] == "room" else extra_reason(m)
+                      if e["check"] == "room":
+                          if is_personal(e):
+                              why = (line_reason(m, time.time() if now is None else now)
+                                     or room_reason(m, min(cap, EXTRA_ON_CAP)))
+                          else:  # 100% only where the meter says a run past the limit cannot bill extra usage
+                              why = room_reason(m, cap if m.get("overage_status") == "rejected" else min(cap, EXTRA_ON_CAP))
+                      else:
+                          why = extra_reason(m) or (out_reason(m) if is_personal(e) else "")
                       if why:
                           tried.append(f"{e['name']}: skipped, {why}")
                           say(f"key-chain: {tried[-1]}")
                           continue
+                  if res is not None and before_retry:
+                      before_retry()
+                  if personal_extra(e):
+                      loud(f"{e['name']} is billing extra usage on the personal account: every key before it is out", environ, say)
                   res = runner(cmd, environ, e, token, cwd=cwd)
                   res["key"] = e["name"]
                   if log:
@@ -1302,7 +1408,9 @@ jobs:
               if argv[:1] == ["plan"]:
                   for e in chain():
                       print(f"{e['name']}: {e['env']} ({e['kind']}{', only with room' if e['check'] == 'room' else ''}"
-                            f"{', extra usage' if e['check'] == 'extra' else ''})"
+                            f"{', under its weekly line' if e['check'] == 'room' and is_personal(e) else ''}"
+                            f"{', extra usage' if e['check'] == 'extra' else ''}"
+                            f"{', only once personal is out' if personal_extra(e) else ''})"
                             f"{'' if os.environ.get(e['env']) else ' - not set'}")
                   return 0
               if argv[:1] != ["run"] or "--" not in argv:
