@@ -780,7 +780,7 @@ jobs:
               if not why:
                   out.update(skip="true", reason=f"docs only ({len(files)} file(s), all {' '.join(suffixes)}), no agent rules")
               elif not has_token:
-                  out.update(skip="false", missing_token="true", reason="no CLAUDE_CODE_OAUTH_TOKEN_WORK, CLAUDE_CODE_OAUTH_TOKEN_WORKMAX, CLAUDE_CODE_OAUTH_TOKEN_HELLO_TEAM, CLAUDE_CODE_OAUTH_TOKEN_HELLO_ULTRA, CLAUDE_CODE_OAUTH_TOKEN or ANTHROPIC_API_KEY_CONSOLE secret")
+                  out.update(skip="false", missing_token="true", reason="no CLAUDE_CODE_OAUTH_TOKEN_WORK, CLAUDE_CODE_OAUTH_TOKEN_WORKMAX, CLAUDE_CODE_OAUTH_TOKEN_HELLO_TEAM, CLAUDE_CODE_OAUTH_TOKEN_HELLO_ULTRA, CLAUDE_CODE_OAUTH_TOKEN, ANTHROPIC_API_KEY_CONSOLE_WORK or ANTHROPIC_API_KEY_CONSOLE secret")
               else:
                   out.update(skip="false", reason="; ".join(why))
           title = body = ""
@@ -1503,7 +1503,7 @@ jobs:
               verdict, lines = "skip", [f"Skipped: {env.get('REASON')}. No Claude usage."]
           elif env.get("MISSING_TOKEN") == "true":
               verdict, lines = "fail", ["**Could not review:** this repository has no `CLAUDE_CODE_OAUTH_TOKEN_WORK`, "
-                                        "`CLAUDE_CODE_OAUTH_TOKEN_HELLO_TEAM`, `CLAUDE_CODE_OAUTH_TOKEN_HELLO_ULTRA`, `CLAUDE_CODE_OAUTH_TOKEN` or `ANTHROPIC_API_KEY_CONSOLE` Actions secret. Set it (nuey-skills `scripts/second-reviewer/set-secrets.sh`), then re-run this job."]
+                                        "`CLAUDE_CODE_OAUTH_TOKEN_WORKMAX`, `CLAUDE_CODE_OAUTH_TOKEN_HELLO_TEAM`, `CLAUDE_CODE_OAUTH_TOKEN_HELLO_ULTRA`, `CLAUDE_CODE_OAUTH_TOKEN`, `ANTHROPIC_API_KEY_CONSOLE_WORK` or `ANTHROPIC_API_KEY_CONSOLE` Actions secret. Set it (nuey-skills `scripts/second-reviewer/set-secrets.sh`), then re-run this job."]
           else:
               if env.get("CODE") != "false" and env.get("CODE_MODE") == "reuse":
                   runs.append(("code", "pass", [reused], {}, None, ""))
