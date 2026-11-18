@@ -98,6 +98,8 @@ jobs:
           the newest commits add or change: is it real, and does the `ci` workflow actually run it? Question 11
           (the `proof` field) also covers the whole pull request, against its Proof lines as they are now.
         - An earlier verdict is not a reason by itself: pass or fail on what the pull request does now.
+        - Say in the summary what the newest commits do and that the merges were clean; a note is only for something
+          the author should still change or check.
       REVIEW_PROMPT: |
         You are the second reviewer for a pull request in ${{ github.repository }}. Another agent
         wrote it and will merge it by itself once the checks pass, with no human review. You are the
@@ -211,12 +213,15 @@ jobs:
         changed wrongly, a security check that can be got around, or a race between concurrent requests. Notes
         are only for style, clarity and could-be-nicer. On a re-review this holds for the newest commits;
         code an earlier round already read follows the re-review rules.
+        A note asks the author to change or check something, and an agent's pull request must answer every note
+        before it lands. Never write a note that only says something is fine: a clean merge of the base, a commit
+        that only re-wraps lines or rewords, an earlier point now fixed, a check that passed. Say that in the summary.
       REVIEW_ARGS: |
         --model opus
         --max-turns 60
         --allowedTools "Read,Grep,Glob,Bash(git diff:*),Bash(git log:*),Bash(git show:*)"
         --disallowedTools "Edit,Write,NotebookEdit,WebFetch,WebSearch"
-        --json-schema '{"type":"object","additionalProperties":false,"required":["verdict","summary","proof","problems","notes"],"properties":{"verdict":{"type":"string","enum":["pass","fail"]},"summary":{"type":"string","description":"One to three plain sentences: what the PR does and your overall judgement."},"proof":{"type":"string","description":"Question 11, one or two plain sentences: which changes the Proof lines cover, which behaviour changes they do not (by name), or no Proof line."},"problems":{"type":"array","description":"Real problems only; empty when verdict is pass.","items":{"type":"object","additionalProperties":false,"required":["kind","file","what","fix"],"properties":{"kind":{"type":"string","enum":["does-not-match-description","unintended-behaviour","security","data-loss","money","sending","sign-in","fake-tests","rule-broken","bug","lost-change","no-backup"]},"file":{"type":"string"},"line":{"type":"integer"},"what":{"type":"string"},"fix":{"type":"string"}}}},"notes":{"type":"array","description":"Optional non-blocking remarks, at most 5.","items":{"type":"string"}}}}'
+        --json-schema '{"type":"object","additionalProperties":false,"required":["verdict","summary","proof","problems","notes"],"properties":{"verdict":{"type":"string","enum":["pass","fail"]},"summary":{"type":"string","description":"One to three plain sentences: what the PR does and your overall judgement."},"proof":{"type":"string","description":"Question 11, one or two plain sentences: which changes the Proof lines cover, which behaviour changes they do not (by name), or no Proof line."},"problems":{"type":"array","description":"Real problems only; empty when verdict is pass.","items":{"type":"object","additionalProperties":false,"required":["kind","file","what","fix"],"properties":{"kind":{"type":"string","enum":["does-not-match-description","unintended-behaviour","security","data-loss","money","sending","sign-in","fake-tests","rule-broken","bug","lost-change","no-backup"]},"file":{"type":"string"},"line":{"type":"integer"},"what":{"type":"string"},"fix":{"type":"string"}}}},"notes":{"type":"array","description":"Optional remarks, at most 5. A note never fails the review, but an agent PR must answer each one (fixed, or not a bug because ...) before it lands (checks-before-main exit 9). Only what the author should change or check; never a note that only says something is fine (a clean merge, a commit that only re-wraps lines, an earlier point now fixed): that goes in the summary.","items":{"type":"string"}}}}'
       RULE_PROMPT: |
         You are the rule reviewer. This change adds or edits an agent rule: an instruction file (AGENTS.md, CLAUDE.md,
         APPROVAL_RULES.md and the like), a skill definition (SKILL.md), or hook or check code that can stop an agent. Several
@@ -312,7 +317,8 @@ jobs:
         file as it is now (not in the patch), the scenario (who, doing what, gets which result), a concrete fix the author can
         make, `bar` (why it meets each part of the bar) and `earlier` ("re-raised" for a point from previous.md, else "new").
         Several flaws in one change are several problems; list each one separately. Everything else goes in notes, at most
-        five, most useful first.
+        five, most useful first. A note asks the author to change or check something (an agent's pull request must answer
+        each one); what you checked and found fine goes in the summary, never in a note.
 
         Never fail on style, wording, length, structure, missing examples, or "could be clearer". Clarifications, log
         entries, recorded IDs, paths and dates, pointers to a canonical doc, and docs that only describe what already exists
@@ -349,7 +355,7 @@ jobs:
         --max-turns 60
         --allowedTools "Read,Grep,Glob,Bash(git diff:*),Bash(git log:*),Bash(git show:*)"
         --disallowedTools "Edit,Write,NotebookEdit,WebFetch,WebSearch"
-        --json-schema '{"type":"object","additionalProperties":false,"required":["verdict","summary","problems","notes"],"properties":{"verdict":{"type":"string","enum":["pass","fail"]},"summary":{"type":"string","description":"One to three plain sentences: what the rule change does and your overall judgement."},"problems":{"type":"array","description":"Only problems that meet the bar; empty when verdict is pass. One item per flaw.","items":{"type":"object","additionalProperties":false,"required":["kind","file","scenario","what","fix","bar","earlier"],"properties":{"kind":{"type":"string","enum":["wrong-scope","perverse-incentive","blocks-legit-work","cross-agent-risk","clash","duplicate","cost","unenforceable","fails-closed","loop","other"]},"file":{"type":"string"},"line":{"type":"integer"},"scenario":{"type":"string","description":"Who, doing what, gets which result."},"what":{"type":"string"},"fix":{"type":"string"},"bar":{"type":"string","description":"Why it meets the bar: what this change brings in or makes worse, why it is likely in normal use, and the harm."},"earlier":{"type":"string","enum":["new","re-raised"],"description":"re-raised: a point from previous.md whose fix fails or was not made; new: anything else."}}}},"notes":{"type":"array","description":"Optional non-blocking remarks, at most 5.","items":{"type":"string"}}}}'
+        --json-schema '{"type":"object","additionalProperties":false,"required":["verdict","summary","problems","notes"],"properties":{"verdict":{"type":"string","enum":["pass","fail"]},"summary":{"type":"string","description":"One to three plain sentences: what the rule change does and your overall judgement."},"problems":{"type":"array","description":"Only problems that meet the bar; empty when verdict is pass. One item per flaw.","items":{"type":"object","additionalProperties":false,"required":["kind","file","scenario","what","fix","bar","earlier"],"properties":{"kind":{"type":"string","enum":["wrong-scope","perverse-incentive","blocks-legit-work","cross-agent-risk","clash","duplicate","cost","unenforceable","fails-closed","loop","other"]},"file":{"type":"string"},"line":{"type":"integer"},"scenario":{"type":"string","description":"Who, doing what, gets which result."},"what":{"type":"string"},"fix":{"type":"string"},"bar":{"type":"string","description":"Why it meets the bar: what this change brings in or makes worse, why it is likely in normal use, and the harm."},"earlier":{"type":"string","enum":["new","re-raised"],"description":"re-raised: a point from previous.md whose fix fails or was not made; new: anything else."}}}},"notes":{"type":"array","description":"Optional remarks, at most 5. A note never fails the review, but an agent PR must answer each one (fixed, or not a bug because ...) before it lands (checks-before-main exit 9). Only what the author should change or check; never a note that only says something is fine (a clean merge, a commit that only re-wraps lines, an earlier point now fixed): that goes in the summary.","items":{"type":"string"}}}}'
     steps:
       # After CI (workflow_run): find the open PR whose head is the commit CI just passed. A newer push or a
       # closed PR means there is nothing to review here (the newer commit's CI starts its own review).
@@ -430,7 +436,7 @@ jobs:
           PR_NUMBER: ${{ steps.pr.outputs.number || github.event.pull_request.number }}
           BASE_REF: ${{ steps.pr.outputs.base || github.event.pull_request.base.ref || github.event.repository.default_branch }}
           HEAD_REF: ${{ steps.pr.outputs.head_ref || github.event.pull_request.head.ref || github.ref_name }}
-          HAS_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN_WORK != '' || secrets.CLAUDE_CODE_OAUTH_TOKEN_WORKMAX != '' || secrets.CLAUDE_CODE_OAUTH_TOKEN != '' || secrets.ANTHROPIC_API_KEY_CONSOLE_WORK != '' || secrets.ANTHROPIC_API_KEY_CONSOLE != '' }}
+          HAS_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN_WORK != '' || secrets.CLAUDE_CODE_OAUTH_TOKEN_WORKMAX != '' || secrets.CLAUDE_CODE_OAUTH_TOKEN_HELLO_TEAM != '' || secrets.CLAUDE_CODE_OAUTH_TOKEN_HELLO_ULTRA != '' || secrets.CLAUDE_CODE_OAUTH_TOKEN != '' || secrets.ANTHROPIC_API_KEY_CONSOLE_WORK != '' || secrets.ANTHROPIC_API_KEY_CONSOLE != '' }}
           SKIP_BRANCHES: ${{ vars.REVIEW_SKIP_BRANCHES }}
           EVENT: ${{ github.event_name }}
         shell: bash
@@ -571,6 +577,24 @@ jobs:
           def as_prev(d, part):
               """The {sha, verdict, problems} of one part of a round, or None."""
               return dict(d[part], sha=d["sha"]) if d and d.get(part) else None
+
+
+          def pick_round(rounds, head, git):
+              """The round to build on, from valid rounds newest first: the one on head itself (the same commit again:
+              reuse its pass and notes, add none), else the one on the nearest earlier commit of head (fewest commits
+              since), else the newest (a force-push: code_round_plan reviews in full). None when there is none."""
+              same = [r for r in rounds if r["sha"] == head]
+              if same:
+                  return same[0]
+              near = []
+              for i, r in enumerate(rounds):
+                  # a commit git cannot resolve (merge-base prints '') is not an ancestor: no round may be, and the
+                  # newest is then returned, which code_round_plan reviews in full (safe, only slower)
+                  if git("merge-base", r["sha"], head).strip() == r["sha"]:
+                      near.append((int(git("rev-list", "--count", f"{r['sha']}..{head}").strip() or 0), i, r))
+              if near:
+                  return min(near, key=lambda x: x[:2])[2]
+              return rounds[0] if rounds else None
 
 
           def code_round_plan(prev, head, base, git):
@@ -756,7 +780,7 @@ jobs:
               if not why:
                   out.update(skip="true", reason=f"docs only ({len(files)} file(s), all {' '.join(suffixes)}), no agent rules")
               elif not has_token:
-                  out.update(skip="false", missing_token="true", reason="no CLAUDE_CODE_OAUTH_TOKEN_WORK, CLAUDE_CODE_OAUTH_TOKEN_WORKMAX, CLAUDE_CODE_OAUTH_TOKEN or ANTHROPIC_API_KEY_CONSOLE secret")
+                  out.update(skip="false", missing_token="true", reason="no CLAUDE_CODE_OAUTH_TOKEN_WORK, CLAUDE_CODE_OAUTH_TOKEN_WORKMAX, CLAUDE_CODE_OAUTH_TOKEN_HELLO_TEAM, CLAUDE_CODE_OAUTH_TOKEN_HELLO_ULTRA, CLAUDE_CODE_OAUTH_TOKEN, ANTHROPIC_API_KEY_CONSOLE_WORK or ANTHROPIC_API_KEY_CONSOLE secret")
               else:
                   out.update(skip="false", reason="; ".join(why))
           title = body = ""
@@ -783,14 +807,18 @@ jobs:
           git_out = lambda *a: subprocess.run(["git", *a], capture_output=True, text=True).stdout  # noqa: E731
 
           def trusted_round():
-              """The newest round kept by a run of this file on workflow_run, or None (see valid_round)."""
+              """The round kept by a run of this file on workflow_run for this head, else the one on the nearest earlier
+              commit of it, else the newest; None when there is none (see valid_round). Not simply the newest: a
+              re-run of an older commit's review, or `overwrite`, gives its artifact a newer id (#1667: the answers run
+              took commit ce020d48's round over the head's own and posted nothing)."""
               import io, zipfile
               if (os.environ.get("EVENT") != "workflow_run" and os.environ.get("ANSWERS") != "true") or not pr:
                   return None
               repo = os.environ["REPO"]
               arts = json.loads(sh("gh", "api", f"repos/{repo}/actions/artifacts?name=second-review-round-pr{pr}&per_page=30",
                                    check=False) or "{}").get("artifacts") or []
-              for a in sorted(arts, key=lambda a: a.get("id") or 0, reverse=True)[:10]:
+              found = []  # (newest first) rounds this file's after-CI runs kept
+              for a in sorted(arts, key=lambda a: (a.get("created_at") or "", a.get("id") or 0), reverse=True)[:10]:
                   if a.get("expired"):
                       continue
                   run = json.loads(sh("gh", "api", f"repos/{repo}/actions/runs/{(a.get('workflow_run') or {}).get('id')}",
@@ -803,8 +831,10 @@ jobs:
                   except Exception:
                       continue
                   if valid_round(d) and str(d.get("pr")) == str(pr):
-                      return d
-              return None
+                      if d["sha"] == head_full:
+                          return d
+                      found.append(d)
+              return pick_round(found, head_full, git_out)
 
           code_mode, rule_mode = "full", "full"
           last_round = trusted_round() if out.get("skip") != "true" else None
@@ -883,6 +913,8 @@ jobs:
         env:
           CLAUDE_CODE_OAUTH_TOKEN_WORK: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN_WORK }}
           CLAUDE_CODE_OAUTH_TOKEN_WORKMAX: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN_WORKMAX }}
+          CLAUDE_CODE_OAUTH_TOKEN_HELLO_TEAM: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN_HELLO_TEAM }}
+          CLAUDE_CODE_OAUTH_TOKEN_HELLO_ULTRA: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN_HELLO_ULTRA }}
           CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           ANTHROPIC_API_KEY_CONSOLE_WORK: ${{ secrets.ANTHROPIC_API_KEY_CONSOLE_WORK }}
           ANTHROPIC_API_KEY_CONSOLE: ${{ secrets.ANTHROPIC_API_KEY_CONSOLE }}
@@ -908,11 +940,18 @@ jobs:
                                its plan has room
             2. work            work account token, the work account's own Max plan (CLAUDE_CODE_OAUTH_TOKEN_WORKMAX,
                                added 2026-10-25), only while its plan has room; weekly-limit tier only
-            3. personal        personal plan token (CLAUDE_CODE_OAUTH_TOKEN), only while its plan has room
-            4. console-work    work Console API key (ANTHROPIC_API_KEY_CONSOLE_WORK), monthly API credits
-            5. console         personal Console API key (ANTHROPIC_API_KEY_CONSOLE)
-            6. team-extra      team account token with extra usage (skipped when the seat has extra usage off)
-            7. personal-extra  personal plan token with extra usage, last
+            3. hello-team      hello@furringline.com's Premium seat in the FURRINGLINE Team (CLAUDE_CODE_OAUTH_TOKEN_HELLO_TEAM,
+                               added 2026-11-18), only while its plan has room
+            4. hello-ultra     hello@furringline.com's own Ultra plan (CLAUDE_CODE_OAUTH_TOKEN_HELLO_ULTRA, added 2026-11-18),
+                               only while its plan has room
+            5. personal        personal plan token (CLAUDE_CODE_OAUTH_TOKEN), only while its plan has room
+            6. console-work    work Console API key (ANTHROPIC_API_KEY_CONSOLE_WORK), monthly API credits
+            7. console         personal Console API key (ANTHROPIC_API_KEY_CONSOLE)
+            8. team-extra      team account token with extra usage (skipped when the seat has extra usage off)
+            9. personal-extra  personal plan token with extra usage, last
+          A key whose secret is empty or missing is skipped with a note, so the chain works before every secret is set.
+          GitHub Actions has no plans.json, so this list names the accounts itself; on a Mac the one list is
+          scripts/accounts/plans.json (claude_accounts.py, 2026-11-18).
 
           Names follow his account names (2026-10-25: team, work, personal). The secret names stay as they were, so
           running workflows keep working: CLAUDE_CODE_OAUTH_TOKEN_WORK is the team account, _WORKMAX the work account.
@@ -959,16 +998,18 @@ jobs:
           KEYS = {
               "team": {"env": "CLAUDE_CODE_OAUTH_TOKEN_WORK", "kind": "plan", "check": "room"},
               "work": {"env": "CLAUDE_CODE_OAUTH_TOKEN_WORKMAX", "kind": "plan", "check": "room"},
+              "hello-team": {"env": "CLAUDE_CODE_OAUTH_TOKEN_HELLO_TEAM", "kind": "plan", "check": "room"},
+              "hello-ultra": {"env": "CLAUDE_CODE_OAUTH_TOKEN_HELLO_ULTRA", "kind": "plan", "check": "room"},
               "personal": {"env": "CLAUDE_CODE_OAUTH_TOKEN", "kind": "plan", "check": "room"},
               "console-work": {"env": "ANTHROPIC_API_KEY_CONSOLE_WORK", "kind": "api", "check": ""},
               "console": {"env": "ANTHROPIC_API_KEY_CONSOLE", "kind": "api", "check": ""},
               "team-extra": {"env": "CLAUDE_CODE_OAUTH_TOKEN_WORK", "kind": "plan", "check": "extra"},
               "personal-extra": {"env": "CLAUDE_CODE_OAUTH_TOKEN", "kind": "plan", "check": "extra"},
           }
-          DEFAULT_CHAIN = "team,work,personal,console-work,console,team-extra,personal-extra"
+          DEFAULT_CHAIN = "team,work,hello-team,hello-ultra,personal,console-work,console,team-extra,personal-extra"
           OLD_NAMES = {"work": "team", "workmax": "work", "work-extra": "team-extra"}  # before 2026-10-25
           KEY_VARS = {"CLAUDE_CODE_OAUTH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN_WORK", "CLAUDE_CODE_OAUTH_TOKEN_WORKMAX",
-                      "ANTHROPIC_API_KEY", "ANTHROPIC_API_KEY_CONSOLE", "ANTHROPIC_API_KEY_CONSOLE_WORK", "ANTHROPIC_AUTH_TOKEN"}
+                      "CLAUDE_CODE_OAUTH_TOKEN_HELLO_TEAM", "CLAUDE_CODE_OAUTH_TOKEN_HELLO_ULTRA", "ANTHROPIC_API_KEY", "ANTHROPIC_API_KEY_CONSOLE", "ANTHROPIC_API_KEY_CONSOLE_WORK", "ANTHROPIC_AUTH_TOKEN"}
           FALL_BACK = re.compile(r"usage limit|hit your limit|limit reached|limit will reset|quota|rate.?limit|credit balance"
                                  r"|\b40[13]\b|unauthori[sz]ed|authenticat|oauth|invalid (api key|token|bearer|x-api-key)"
                                  r"|token (has )?expired|/login|not logged in|forbidden|billing", re.I)
@@ -981,7 +1022,8 @@ jobs:
           PRICES = {"opus": (4, 20, 0.20, 5), "fable": (10, 50, 0.25, 12.5), "sonnet": (2, 10, 0.20, 2.5),
                     "haiku": (0.10, 0.50, 0.01, 0.125)}
           TOKEN_FIELDS = ("inputTokens", "outputTokens", "cacheReadInputTokens", "cacheCreationInputTokens")
-          ACCOUNTS = {"team": "team", "team-extra": "team", "work": "work", "personal": "personal",
+          ACCOUNTS = {"team": "team", "team-extra": "team", "work": "work", "hello-team": "hello-team",
+                      "hello-ultra": "hello-ultra", "personal": "personal",
                       "personal-extra": "personal", "console-work": "console", "console": "console"}
 
 
@@ -1291,6 +1333,8 @@ jobs:
         env:
           CLAUDE_CODE_OAUTH_TOKEN_WORK: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN_WORK }}
           CLAUDE_CODE_OAUTH_TOKEN_WORKMAX: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN_WORKMAX }}
+          CLAUDE_CODE_OAUTH_TOKEN_HELLO_TEAM: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN_HELLO_TEAM }}
+          CLAUDE_CODE_OAUTH_TOKEN_HELLO_ULTRA: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN_HELLO_ULTRA }}
           CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           ANTHROPIC_API_KEY_CONSOLE_WORK: ${{ secrets.ANTHROPIC_API_KEY_CONSOLE_WORK }}
           ANTHROPIC_API_KEY_CONSOLE: ${{ secrets.ANTHROPIC_API_KEY_CONSOLE }}
@@ -1459,7 +1503,7 @@ jobs:
               verdict, lines = "skip", [f"Skipped: {env.get('REASON')}. No Claude usage."]
           elif env.get("MISSING_TOKEN") == "true":
               verdict, lines = "fail", ["**Could not review:** this repository has no `CLAUDE_CODE_OAUTH_TOKEN_WORK`, "
-                                        "`CLAUDE_CODE_OAUTH_TOKEN` or `ANTHROPIC_API_KEY_CONSOLE` Actions secret. Set it (nuey-skills `scripts/second-reviewer/set-secrets.sh`), then re-run this job."]
+                                        "`CLAUDE_CODE_OAUTH_TOKEN_WORKMAX`, `CLAUDE_CODE_OAUTH_TOKEN_HELLO_TEAM`, `CLAUDE_CODE_OAUTH_TOKEN_HELLO_ULTRA`, `CLAUDE_CODE_OAUTH_TOKEN`, `ANTHROPIC_API_KEY_CONSOLE_WORK` or `ANTHROPIC_API_KEY_CONSOLE` Actions secret. Set it (nuey-skills `scripts/second-reviewer/set-secrets.sh`), then re-run this job."]
           else:
               if env.get("CODE") != "false" and env.get("CODE_MODE") == "reuse":
                   runs.append(("code", "pass", [reused], {}, None, ""))
