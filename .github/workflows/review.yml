@@ -436,7 +436,7 @@ jobs:
           PR_NUMBER: ${{ steps.pr.outputs.number || github.event.pull_request.number }}
           BASE_REF: ${{ steps.pr.outputs.base || github.event.pull_request.base.ref || github.event.repository.default_branch }}
           HEAD_REF: ${{ steps.pr.outputs.head_ref || github.event.pull_request.head.ref || github.ref_name }}
-          HAS_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN_WORK != '' || secrets.CLAUDE_CODE_OAUTH_TOKEN_WORKMAX != '' || secrets.CLAUDE_CODE_OAUTH_TOKEN_HELLO_TEAM != '' || secrets.CLAUDE_CODE_OAUTH_TOKEN_HELLO_ULTRA != '' || secrets.CLAUDE_CODE_OAUTH_TOKEN != '' || secrets.ANTHROPIC_API_KEY_CONSOLE_WORK != '' || secrets.ANTHROPIC_API_KEY_CONSOLE != '' }}
+          HAS_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN_WORK != '' || secrets.CLAUDE_CODE_OAUTH_TOKEN_WORKMAX != '' || secrets.CLAUDE_CODE_OAUTH_TOKEN_HELLO_TEAM != '' || secrets.CLAUDE_CODE_OAUTH_TOKEN_HELLO_ULTRA != '' || secrets.CLAUDE_CODE_OAUTH_TOKEN_NUEYDADDY != '' || secrets.CLAUDE_CODE_OAUTH_TOKEN_AGENTS_TEAM != '' || secrets.CLAUDE_CODE_OAUTH_TOKEN_AGENTS_ULTRA != '' || secrets.CLAUDE_CODE_OAUTH_TOKEN != '' || secrets.ANTHROPIC_API_KEY_CONSOLE_WORK != '' || secrets.ANTHROPIC_API_KEY_CONSOLE != '' }}
           SKIP_BRANCHES: ${{ vars.REVIEW_SKIP_BRANCHES }}
           EVENT: ${{ github.event_name }}
         shell: bash
@@ -780,7 +780,7 @@ jobs:
               if not why:
                   out.update(skip="true", reason=f"docs only ({len(files)} file(s), all {' '.join(suffixes)}), no agent rules")
               elif not has_token:
-                  out.update(skip="false", missing_token="true", reason="no CLAUDE_CODE_OAUTH_TOKEN_WORK, CLAUDE_CODE_OAUTH_TOKEN_WORKMAX, CLAUDE_CODE_OAUTH_TOKEN_HELLO_TEAM, CLAUDE_CODE_OAUTH_TOKEN_HELLO_ULTRA, CLAUDE_CODE_OAUTH_TOKEN, ANTHROPIC_API_KEY_CONSOLE_WORK or ANTHROPIC_API_KEY_CONSOLE secret")
+                  out.update(skip="false", missing_token="true", reason="no CLAUDE_CODE_OAUTH_TOKEN_WORK, CLAUDE_CODE_OAUTH_TOKEN_WORKMAX, CLAUDE_CODE_OAUTH_TOKEN_HELLO_TEAM, CLAUDE_CODE_OAUTH_TOKEN_HELLO_ULTRA, CLAUDE_CODE_OAUTH_TOKEN_NUEYDADDY, CLAUDE_CODE_OAUTH_TOKEN_AGENTS_TEAM, CLAUDE_CODE_OAUTH_TOKEN_AGENTS_ULTRA, CLAUDE_CODE_OAUTH_TOKEN, ANTHROPIC_API_KEY_CONSOLE_WORK or ANTHROPIC_API_KEY_CONSOLE secret")
               else:
                   out.update(skip="false", reason="; ".join(why))
           title = body = ""
@@ -915,6 +915,9 @@ jobs:
           CLAUDE_CODE_OAUTH_TOKEN_WORKMAX: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN_WORKMAX }}
           CLAUDE_CODE_OAUTH_TOKEN_HELLO_TEAM: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN_HELLO_TEAM }}
           CLAUDE_CODE_OAUTH_TOKEN_HELLO_ULTRA: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN_HELLO_ULTRA }}
+          CLAUDE_CODE_OAUTH_TOKEN_NUEYDADDY: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN_NUEYDADDY }}
+          CLAUDE_CODE_OAUTH_TOKEN_AGENTS_TEAM: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN_AGENTS_TEAM }}
+          CLAUDE_CODE_OAUTH_TOKEN_AGENTS_ULTRA: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN_AGENTS_ULTRA }}
           CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           ANTHROPIC_API_KEY_CONSOLE_WORK: ${{ secrets.ANTHROPIC_API_KEY_CONSOLE_WORK }}
           ANTHROPIC_API_KEY_CONSOLE: ${{ secrets.ANTHROPIC_API_KEY_CONSOLE }}
@@ -944,11 +947,17 @@ jobs:
                                added 2026-11-18), only while its plan has room
             4. hello-ultra     hello@furringline.com's own Ultra plan (CLAUDE_CODE_OAUTH_TOKEN_HELLO_ULTRA, added 2026-11-18),
                                only while its plan has room
-            5. personal        personal plan token (CLAUDE_CODE_OAUTH_TOKEN), only while its plan has room
-            6. console-work    work Console API key (ANTHROPIC_API_KEY_CONSOLE_WORK), monthly API credits
-            7. console         personal Console API key (ANTHROPIC_API_KEY_CONSOLE)
-            8. team-extra      team account token with extra usage (skipped when the seat has extra usage off)
-            9. personal-extra  personal plan token with extra usage, last
+            5. nueydaddy       nueydaddy@gmail.com's own Ultra plan (CLAUDE_CODE_OAUTH_TOKEN_NUEYDADDY, added 2026-11-18),
+                               only while its plan has room
+            6. agents-team     agents@furringline.com's Premium seat in the FURRINGLINE Team
+                               (CLAUDE_CODE_OAUTH_TOKEN_AGENTS_TEAM, added 2026-11-18), only while its plan has room
+            7. agents-ultra    agents@furringline.com's own Ultra plan (CLAUDE_CODE_OAUTH_TOKEN_AGENTS_ULTRA, added 2026-11-18),
+                               only while its plan has room
+            8. personal        personal plan token (CLAUDE_CODE_OAUTH_TOKEN), only while its plan has room
+            9. console-work    work Console API key (ANTHROPIC_API_KEY_CONSOLE_WORK), monthly API credits
+           10. console         personal Console API key (ANTHROPIC_API_KEY_CONSOLE)
+           11. team-extra      team account token with extra usage (skipped when the seat has extra usage off)
+           12. personal-extra  personal plan token with extra usage, last
           A key whose secret is empty or missing is skipped with a note, so the chain works before every secret is set.
           GitHub Actions has no plans.json, so this list names the accounts itself; on a Mac the one list is
           scripts/accounts/plans.json (claude_accounts.py, 2026-11-18).
@@ -1000,16 +1009,20 @@ jobs:
               "work": {"env": "CLAUDE_CODE_OAUTH_TOKEN_WORKMAX", "kind": "plan", "check": "room"},
               "hello-team": {"env": "CLAUDE_CODE_OAUTH_TOKEN_HELLO_TEAM", "kind": "plan", "check": "room"},
               "hello-ultra": {"env": "CLAUDE_CODE_OAUTH_TOKEN_HELLO_ULTRA", "kind": "plan", "check": "room"},
+              "nueydaddy": {"env": "CLAUDE_CODE_OAUTH_TOKEN_NUEYDADDY", "kind": "plan", "check": "room"},
+              "agents-team": {"env": "CLAUDE_CODE_OAUTH_TOKEN_AGENTS_TEAM", "kind": "plan", "check": "room"},
+              "agents-ultra": {"env": "CLAUDE_CODE_OAUTH_TOKEN_AGENTS_ULTRA", "kind": "plan", "check": "room"},
               "personal": {"env": "CLAUDE_CODE_OAUTH_TOKEN", "kind": "plan", "check": "room"},
               "console-work": {"env": "ANTHROPIC_API_KEY_CONSOLE_WORK", "kind": "api", "check": ""},
               "console": {"env": "ANTHROPIC_API_KEY_CONSOLE", "kind": "api", "check": ""},
               "team-extra": {"env": "CLAUDE_CODE_OAUTH_TOKEN_WORK", "kind": "plan", "check": "extra"},
               "personal-extra": {"env": "CLAUDE_CODE_OAUTH_TOKEN", "kind": "plan", "check": "extra"},
           }
-          DEFAULT_CHAIN = "team,work,hello-team,hello-ultra,personal,console-work,console,team-extra,personal-extra"
+          DEFAULT_CHAIN = "team,work,hello-team,hello-ultra,nueydaddy,agents-team,agents-ultra,personal,console-work,console,team-extra,personal-extra"
           OLD_NAMES = {"work": "team", "workmax": "work", "work-extra": "team-extra"}  # before 2026-10-25
           KEY_VARS = {"CLAUDE_CODE_OAUTH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN_WORK", "CLAUDE_CODE_OAUTH_TOKEN_WORKMAX",
-                      "CLAUDE_CODE_OAUTH_TOKEN_HELLO_TEAM", "CLAUDE_CODE_OAUTH_TOKEN_HELLO_ULTRA", "ANTHROPIC_API_KEY", "ANTHROPIC_API_KEY_CONSOLE", "ANTHROPIC_API_KEY_CONSOLE_WORK", "ANTHROPIC_AUTH_TOKEN"}
+                      "CLAUDE_CODE_OAUTH_TOKEN_HELLO_TEAM", "CLAUDE_CODE_OAUTH_TOKEN_HELLO_ULTRA", "CLAUDE_CODE_OAUTH_TOKEN_NUEYDADDY",
+                      "CLAUDE_CODE_OAUTH_TOKEN_AGENTS_TEAM", "CLAUDE_CODE_OAUTH_TOKEN_AGENTS_ULTRA", "ANTHROPIC_API_KEY", "ANTHROPIC_API_KEY_CONSOLE", "ANTHROPIC_API_KEY_CONSOLE_WORK", "ANTHROPIC_AUTH_TOKEN"}
           FALL_BACK = re.compile(r"usage limit|hit your limit|limit reached|limit will reset|quota|rate.?limit|credit balance"
                                  r"|\b40[13]\b|unauthori[sz]ed|authenticat|oauth|invalid (api key|token|bearer|x-api-key)"
                                  r"|token (has )?expired|/login|not logged in|forbidden|billing", re.I)
@@ -1023,7 +1036,8 @@ jobs:
                     "haiku": (0.10, 0.50, 0.01, 0.125)}
           TOKEN_FIELDS = ("inputTokens", "outputTokens", "cacheReadInputTokens", "cacheCreationInputTokens")
           ACCOUNTS = {"team": "team", "team-extra": "team", "work": "work", "hello-team": "hello-team",
-                      "hello-ultra": "hello-ultra", "personal": "personal",
+                      "hello-ultra": "hello-ultra", "nueydaddy": "nueydaddy", "agents-team": "agents-team",
+                      "agents-ultra": "agents-ultra", "personal": "personal",
                       "personal-extra": "personal", "console-work": "console", "console": "console"}
 
 
@@ -1335,6 +1349,9 @@ jobs:
           CLAUDE_CODE_OAUTH_TOKEN_WORKMAX: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN_WORKMAX }}
           CLAUDE_CODE_OAUTH_TOKEN_HELLO_TEAM: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN_HELLO_TEAM }}
           CLAUDE_CODE_OAUTH_TOKEN_HELLO_ULTRA: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN_HELLO_ULTRA }}
+          CLAUDE_CODE_OAUTH_TOKEN_NUEYDADDY: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN_NUEYDADDY }}
+          CLAUDE_CODE_OAUTH_TOKEN_AGENTS_TEAM: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN_AGENTS_TEAM }}
+          CLAUDE_CODE_OAUTH_TOKEN_AGENTS_ULTRA: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN_AGENTS_ULTRA }}
           CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           ANTHROPIC_API_KEY_CONSOLE_WORK: ${{ secrets.ANTHROPIC_API_KEY_CONSOLE_WORK }}
           ANTHROPIC_API_KEY_CONSOLE: ${{ secrets.ANTHROPIC_API_KEY_CONSOLE }}
@@ -1503,7 +1520,7 @@ jobs:
               verdict, lines = "skip", [f"Skipped: {env.get('REASON')}. No Claude usage."]
           elif env.get("MISSING_TOKEN") == "true":
               verdict, lines = "fail", ["**Could not review:** this repository has no `CLAUDE_CODE_OAUTH_TOKEN_WORK`, "
-                                        "`CLAUDE_CODE_OAUTH_TOKEN_WORKMAX`, `CLAUDE_CODE_OAUTH_TOKEN_HELLO_TEAM`, `CLAUDE_CODE_OAUTH_TOKEN_HELLO_ULTRA`, `CLAUDE_CODE_OAUTH_TOKEN`, `ANTHROPIC_API_KEY_CONSOLE_WORK` or `ANTHROPIC_API_KEY_CONSOLE` Actions secret. Set it (nuey-skills `scripts/second-reviewer/set-secrets.sh`), then re-run this job."]
+                                        "`CLAUDE_CODE_OAUTH_TOKEN_WORKMAX`, `CLAUDE_CODE_OAUTH_TOKEN_HELLO_TEAM`, `CLAUDE_CODE_OAUTH_TOKEN_HELLO_ULTRA`, `CLAUDE_CODE_OAUTH_TOKEN_NUEYDADDY`, `CLAUDE_CODE_OAUTH_TOKEN_AGENTS_TEAM`, `CLAUDE_CODE_OAUTH_TOKEN_AGENTS_ULTRA`, `CLAUDE_CODE_OAUTH_TOKEN`, `ANTHROPIC_API_KEY_CONSOLE_WORK` or `ANTHROPIC_API_KEY_CONSOLE` Actions secret. Set it (nuey-skills `scripts/second-reviewer/set-secrets.sh`), then re-run this job."]
           else:
               if env.get("CODE") != "false" and env.get("CODE_MODE") == "reuse":
                   runs.append(("code", "pass", [reused], {}, None, ""))
