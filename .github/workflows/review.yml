@@ -124,7 +124,30 @@ jobs:
         1. Does each change do what the description says? A change the description does not mention
            is a problem only when it changes behaviour.
         2. Is there an unintended behaviour change (a default, a schedule, a branch, a path, an
-           interface, error handling, something removed by accident)?
+           interface, error handling, something removed by accident)? And does the change bring back a
+           problem an earlier change solved (Narathip, 2026-11-22: "the old problems need to stay solved")?
+           For each part the diff removes, switches off, narrows, delays, bypasses or works around, on
+           purpose or not (a wake-up, a check, a guard, a retry, a step, a schedule, a default, a documented
+           off switch set to off, a stop whose start again is only planned for later; not a guard's own
+           prescribed escape hatch for one false result, such as a
+           Jev-Override trailer with a real reason), find what it was built to solve: the README, skill or lesson line that says so (for example "the root
+           cause it fixes"), or the commit that added it (`git log -S '<removed line>' --format='%h %s' --
+           <file>`, then `git show` that commit). When that problem would come back in normal use and the
+           change does not keep it solved another way, it is a real problem even when the description
+           states the removal: kind "old-problem-back"; say which old problem comes back and where it is
+           written, and the fix is a way that solves both. Not a problem: the description shows, and the
+           diff bears out, that the old problem is solved another way or no longer exists; a stop that
+           contains harm that grows while a review would run (a leak, lost data, a runaway loop burning
+           money or plan; noise or a slow or stuck step is not; never a hook, guard or required check
+           that stops agents, which is fixed at its code instead) and says how the part comes back (a restore condition or an open fix job); a
+           revert of a change that itself broke something (main red after it landed, or a hook, guard or check it
+           added that stops honest work) that names the breakage and how that change comes back (re-applied once
+           fixed, or an open fix job); or Narathip
+           chose this trade: the description quotes his own words, or his OK or number with the option
+           it picks, with the date and where (a chat, or a record id, which you can Grep for in
+           .agents/skills/record when this repository has it), and they name the part and order it
+           stopped ("stop the job wait"), not only describe a problem or ask for an outcome ("stop telling
+           me X" or "the wait is noisy" name the part's noise, not an order to stop the part).
         3. Is there a security, data-loss, money, sending or sign-in risk? For example a secret in code
            or logs, a weaker permission, a delete or overwrite without a guard, a payment or an outgoing
            email/message/post that could fire wrongly, a credential or login flow changed.
@@ -198,7 +221,8 @@ jobs:
             code (kind "does-not-match-description").
 
         verdict "fail" only for a real problem: a bug, a risk from question 3, fake tests, a broken
-        rule, a change lost in a merge (question 6; leftover conflict markers always fail), new
+        rule, an old problem brought back (question 2), a change lost in a merge
+        (question 6; leftover conflict markers always fail), new
         data with no backup (question 7), a plan-login-ok marker on a line that sends the login
         (question 8), a false lesson check claim (question 9), a run-now skip with no honest reason
         (question 10), a Proof line the diff contradicts (question 11), or a change that does not do what it
@@ -208,7 +232,8 @@ jobs:
         in one or two plain sentences, and the exact fix the author agent should make.
         Docs: in nueyprap/nuey-skills, Markdown files are agent instructions that every agent follows, so
         docs-only pull requests are reviewed there. A docs change fails only for a real problem: a rule that
-        contradicts another rule, a rule lost or weakened by accident, a wrong path or command, or a secret.
+        contradicts another rule, a rule lost or weakened by accident, an old problem brought back
+        (question 2), a wrong path or command, or a secret.
         Wording, style and length go in notes.
         Write plain, short English. Your final answer is the structured output only.
         A concrete bug in the changed code is a problem, never a note, even when the fix is one line: a crash
@@ -224,7 +249,7 @@ jobs:
         --max-turns 60
         --allowedTools "Read,Grep,Glob,Bash(git diff:*),Bash(git log:*),Bash(git show:*)"
         --disallowedTools "Edit,Write,NotebookEdit,WebFetch,WebSearch"
-        --json-schema '{"type":"object","additionalProperties":false,"required":["verdict","summary","proof","problems","notes"],"properties":{"verdict":{"type":"string","enum":["pass","fail"]},"summary":{"type":"string","description":"One to three plain sentences: what the PR does and your overall judgement."},"proof":{"type":"string","description":"Question 11, one or two plain sentences: which changes the Proof lines cover, which behaviour changes they do not (by name), or no Proof line."},"problems":{"type":"array","description":"Real problems only; empty when verdict is pass.","items":{"type":"object","additionalProperties":false,"required":["kind","file","what","fix"],"properties":{"kind":{"type":"string","enum":["does-not-match-description","unintended-behaviour","security","data-loss","money","sending","sign-in","fake-tests","rule-broken","bug","lost-change","no-backup"]},"file":{"type":"string"},"line":{"type":"integer"},"what":{"type":"string"},"fix":{"type":"string"}}}},"notes":{"type":"array","description":"Optional remarks, at most 5. A note never fails the review, but an agent PR must answer each one (fixed, or not a bug because ...) before it lands (checks-before-main exit 9). Only what the author should change or check; never a note that only says something is fine (a clean merge, a commit that only re-wraps lines, an earlier point now fixed): that goes in the summary.","items":{"type":"string"}}}}'
+        --json-schema '{"type":"object","additionalProperties":false,"required":["verdict","summary","proof","problems","notes"],"properties":{"verdict":{"type":"string","enum":["pass","fail"]},"summary":{"type":"string","description":"One to three plain sentences: what the PR does and your overall judgement."},"proof":{"type":"string","description":"Question 11, one or two plain sentences: which changes the Proof lines cover, which behaviour changes they do not (by name), or no Proof line."},"problems":{"type":"array","description":"Real problems only; empty when verdict is pass.","items":{"type":"object","additionalProperties":false,"required":["kind","file","what","fix"],"properties":{"kind":{"type":"string","enum":["does-not-match-description","unintended-behaviour","security","data-loss","money","sending","sign-in","fake-tests","rule-broken","bug","lost-change","no-backup","old-problem-back"]},"file":{"type":"string"},"line":{"type":"integer"},"what":{"type":"string"},"fix":{"type":"string"}}}},"notes":{"type":"array","description":"Optional remarks, at most 5. A note never fails the review, but an agent PR must answer each one (fixed, or not a bug because ...) before it lands (checks-before-main exit 9). Only what the author should change or check; never a note that only says something is fine (a clean merge, a commit that only re-wraps lines, an earlier point now fixed): that goes in the summary.","items":{"type":"string"}}}}'
       RULE_PROMPT: |
         You are the rule reviewer. This change adds or edits an agent rule: an instruction file (AGENTS.md, CLAUDE.md,
         APPROVAL_RULES.md and the like), a skill definition (SKILL.md), or hook or check code that can stop an agent. Several
