@@ -464,7 +464,7 @@ jobs:
           PR_NUMBER: ${{ steps.pr.outputs.number || github.event.pull_request.number }}
           BASE_REF: ${{ steps.pr.outputs.base || github.event.pull_request.base.ref || github.event.repository.default_branch }}
           HEAD_REF: ${{ steps.pr.outputs.head_ref || github.event.pull_request.head.ref || github.ref_name }}
-          HAS_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN_WORK != '' || secrets.CLAUDE_CODE_OAUTH_TOKEN_WORKMAX != '' || secrets.CLAUDE_CODE_OAUTH_TOKEN_HELLO_TEAM != '' || secrets.CLAUDE_CODE_OAUTH_TOKEN_HELLO_ULTRA != '' || secrets.CLAUDE_CODE_OAUTH_TOKEN_NUEYDADDY != '' || secrets.CLAUDE_CODE_OAUTH_TOKEN_AGENTS_TEAM != '' || secrets.CLAUDE_CODE_OAUTH_TOKEN_AGENTS_ULTRA != '' || secrets.ANTHROPIC_API_KEY_CONSOLE_WORK != '' || secrets.ANTHROPIC_API_KEY_CONSOLE != '' }}
+          HAS_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN_WORK != '' || secrets.CLAUDE_CODE_OAUTH_TOKEN_WORKMAX != '' || secrets.CLAUDE_CODE_OAUTH_TOKEN_HELLO_TEAM != '' || secrets.CLAUDE_CODE_OAUTH_TOKEN_HELLO_ULTRA != '' || secrets.CLAUDE_CODE_OAUTH_TOKEN_NUEYDADDY != '' || secrets.CLAUDE_CODE_OAUTH_TOKEN_AGENTS_TEAM != '' || secrets.CLAUDE_CODE_OAUTH_TOKEN_AGENTS_ULTRA != '' || secrets.CLAUDE_CODE_OAUTH_TOKEN_ROUTINES_TEAM != '' || secrets.CLAUDE_CODE_OAUTH_TOKEN_ROUTINES_ULTRA != '' || secrets.CLAUDE_CODE_OAUTH_TOKEN_TEST_TEAM != '' || secrets.CLAUDE_CODE_OAUTH_TOKEN_TEST_ULTRA != '' || secrets.CLAUDE_CODE_OAUTH_TOKEN_MAINTENANCE_TEAM != '' || secrets.CLAUDE_CODE_OAUTH_TOKEN_MAINTENANCE_ULTRA != '' || secrets.CLAUDE_CODE_OAUTH_TOKEN_WORKERS_TEAM != '' || secrets.CLAUDE_CODE_OAUTH_TOKEN_WORKERS_ULTRA != '' || secrets.ANTHROPIC_API_KEY_CONSOLE_TEAM != '' || secrets.ANTHROPIC_API_KEY_CONSOLE_HELLO_ULTRA != '' || secrets.ANTHROPIC_API_KEY_CONSOLE_NUEYDADDY != '' || secrets.ANTHROPIC_API_KEY_CONSOLE_AGENTS_ULTRA != '' || secrets.ANTHROPIC_API_KEY_CONSOLE_ROUTINES_ULTRA != '' || secrets.ANTHROPIC_API_KEY_CONSOLE_TEST_ULTRA != '' || secrets.ANTHROPIC_API_KEY_CONSOLE_MAINTENANCE_ULTRA != '' || secrets.ANTHROPIC_API_KEY_CONSOLE_WORKERS_ULTRA != '' || secrets.ANTHROPIC_API_KEY_CONSOLE_WORK != '' || secrets.ANTHROPIC_API_KEY_CONSOLE != '' }}
           SKIP_BRANCHES: ${{ vars.REVIEW_SKIP_BRANCHES }}
           EVENT: ${{ github.event_name }}
         shell: bash
@@ -808,7 +808,7 @@ jobs:
               if not why:
                   out.update(skip="true", reason=f"docs only ({len(files)} file(s), all {' '.join(suffixes)}), no agent rules")
               elif not has_token:
-                  out.update(skip="false", missing_token="true", reason="no CLAUDE_CODE_OAUTH_TOKEN_WORK, CLAUDE_CODE_OAUTH_TOKEN_WORKMAX, CLAUDE_CODE_OAUTH_TOKEN_HELLO_TEAM, CLAUDE_CODE_OAUTH_TOKEN_HELLO_ULTRA, CLAUDE_CODE_OAUTH_TOKEN_NUEYDADDY, CLAUDE_CODE_OAUTH_TOKEN_AGENTS_TEAM, CLAUDE_CODE_OAUTH_TOKEN_AGENTS_ULTRA, ANTHROPIC_API_KEY_CONSOLE_WORK or ANTHROPIC_API_KEY_CONSOLE secret")
+                  out.update(skip="false", missing_token="true", reason="no CLAUDE_CODE_OAUTH_TOKEN_WORK, CLAUDE_CODE_OAUTH_TOKEN_WORKMAX, CLAUDE_CODE_OAUTH_TOKEN_HELLO_TEAM, CLAUDE_CODE_OAUTH_TOKEN_HELLO_ULTRA, CLAUDE_CODE_OAUTH_TOKEN_NUEYDADDY, CLAUDE_CODE_OAUTH_TOKEN_AGENTS_TEAM, CLAUDE_CODE_OAUTH_TOKEN_AGENTS_ULTRA, CLAUDE_CODE_OAUTH_TOKEN_ROUTINES_TEAM, CLAUDE_CODE_OAUTH_TOKEN_ROUTINES_ULTRA, CLAUDE_CODE_OAUTH_TOKEN_TEST_TEAM, CLAUDE_CODE_OAUTH_TOKEN_TEST_ULTRA, CLAUDE_CODE_OAUTH_TOKEN_MAINTENANCE_TEAM, CLAUDE_CODE_OAUTH_TOKEN_MAINTENANCE_ULTRA, CLAUDE_CODE_OAUTH_TOKEN_WORKERS_TEAM, CLAUDE_CODE_OAUTH_TOKEN_WORKERS_ULTRA, ANTHROPIC_API_KEY_CONSOLE_WORK, ANTHROPIC_API_KEY_CONSOLE or ANTHROPIC_API_KEY_CONSOLE_<org> secret")
               else:
                   out.update(skip="false", reason="; ".join(why))
           title = body = ""
@@ -929,12 +929,12 @@ jobs:
           echo "CLAUDE_BIN=$HOME/.local/bin/claude" >> "$GITHUB_ENV"
           "$HOME/.local/bin/claude" --version
 
-      # The key chain (Narathip 2026-10-25: "so we start with weekly limit first, from work then personal,
-      # then console credit, from work then personal, then usage credit, from work then personal"):
-      # each plan token only while its weekly limit has room (meter read first), then the Console API
-      # keys (work, then personal). Never extra usage and never his personal plan (Narathip 2026-11-19),
-      # so CLAUDE_CODE_OAUTH_TOKEN (the personal plan token) is not passed. The chain code is nuey-skills
-      # scripts/claude-keys/key_chain.py, copied below by scripts/claude-keys/embed.py.
+      # The key chain: API keys first (Narathip 2026-11-24: "ok change it to api keys first"; the monthly
+      # API credit can be spent only through an API key and is lost at the end of each month), then each
+      # plan token only while its limit has room (meter read first). Never extra usage and never his
+      # personal plan (Narathip 2026-11-19), so CLAUDE_CODE_OAUTH_TOKEN (the personal plan token) is not
+      # passed. The chain code is nuey-skills scripts/claude-keys/key_chain.py, copied below by
+      # scripts/claude-keys/embed.py.
       - name: Review
         id: claude
         if: steps.pr.outputs.go != 'false' && steps.scope.outputs.skip != 'true' && steps.scope.outputs.missing_token != 'true' && steps.scope.outputs.need_claude != 'false'
@@ -947,6 +947,22 @@ jobs:
           CLAUDE_CODE_OAUTH_TOKEN_NUEYDADDY: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN_NUEYDADDY }}
           CLAUDE_CODE_OAUTH_TOKEN_AGENTS_TEAM: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN_AGENTS_TEAM }}
           CLAUDE_CODE_OAUTH_TOKEN_AGENTS_ULTRA: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN_AGENTS_ULTRA }}
+          CLAUDE_CODE_OAUTH_TOKEN_ROUTINES_TEAM: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN_ROUTINES_TEAM }}
+          CLAUDE_CODE_OAUTH_TOKEN_ROUTINES_ULTRA: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN_ROUTINES_ULTRA }}
+          CLAUDE_CODE_OAUTH_TOKEN_TEST_TEAM: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN_TEST_TEAM }}
+          CLAUDE_CODE_OAUTH_TOKEN_TEST_ULTRA: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN_TEST_ULTRA }}
+          CLAUDE_CODE_OAUTH_TOKEN_MAINTENANCE_TEAM: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN_MAINTENANCE_TEAM }}
+          CLAUDE_CODE_OAUTH_TOKEN_MAINTENANCE_ULTRA: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN_MAINTENANCE_ULTRA }}
+          CLAUDE_CODE_OAUTH_TOKEN_WORKERS_TEAM: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN_WORKERS_TEAM }}
+          CLAUDE_CODE_OAUTH_TOKEN_WORKERS_ULTRA: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN_WORKERS_ULTRA }}
+          ANTHROPIC_API_KEY_CONSOLE_TEAM: ${{ secrets.ANTHROPIC_API_KEY_CONSOLE_TEAM }}
+          ANTHROPIC_API_KEY_CONSOLE_HELLO_ULTRA: ${{ secrets.ANTHROPIC_API_KEY_CONSOLE_HELLO_ULTRA }}
+          ANTHROPIC_API_KEY_CONSOLE_NUEYDADDY: ${{ secrets.ANTHROPIC_API_KEY_CONSOLE_NUEYDADDY }}
+          ANTHROPIC_API_KEY_CONSOLE_AGENTS_ULTRA: ${{ secrets.ANTHROPIC_API_KEY_CONSOLE_AGENTS_ULTRA }}
+          ANTHROPIC_API_KEY_CONSOLE_ROUTINES_ULTRA: ${{ secrets.ANTHROPIC_API_KEY_CONSOLE_ROUTINES_ULTRA }}
+          ANTHROPIC_API_KEY_CONSOLE_TEST_ULTRA: ${{ secrets.ANTHROPIC_API_KEY_CONSOLE_TEST_ULTRA }}
+          ANTHROPIC_API_KEY_CONSOLE_MAINTENANCE_ULTRA: ${{ secrets.ANTHROPIC_API_KEY_CONSOLE_MAINTENANCE_ULTRA }}
+          ANTHROPIC_API_KEY_CONSOLE_WORKERS_ULTRA: ${{ secrets.ANTHROPIC_API_KEY_CONSOLE_WORKERS_ULTRA }}
           ANTHROPIC_API_KEY_CONSOLE_WORK: ${{ secrets.ANTHROPIC_API_KEY_CONSOLE_WORK }}
           ANTHROPIC_API_KEY_CONSOLE: ${{ secrets.ANTHROPIC_API_KEY_CONSOLE }}
           CLAUDE_KEY_CHAIN: ${{ vars.CLAUDE_KEY_CHAIN }}
@@ -965,27 +981,55 @@ jobs:
               key_chain.py run --out <file> [--args-env NAME] -- <claude> -p <prompt> [args...]
               key_chain.py plan            the chain this environment would try, without running anything
 
-          Order (Narathip, 2026-10-25: "so we start with weekly limit first, from work then personal, then
-          console credit, from work then personal"; the extra-usage tier after them and the personal plan key were removed on
-          2026-11-19, below):
+          Order: API keys first, then the plans (Narathip, 2026-11-24: "ok change it to api keys first"): API credit can be
+          spent only through an API key and is lost at the end of each month, while plan usage serves every other job; the
+          personal Console key (10 below) runs last of the API keys, before team. The numbers below are the chain's order.
+          Old-Way: from 2026-10-25 ("so we start with weekly limit first, from work then personal, then console credit, from
+          work then personal") the plans ran first and the API keys last; the extra-usage tier and the personal plan key were
+          removed on 2026-11-19, below.
 
-            1. team            team account token, the FURRINGLINE Team seat (CLAUDE_CODE_OAUTH_TOKEN_WORK), only while
+            1 to 8. the plan accounts' Console API keys, monthly API credits (Narathip, 2026-11-24: "you can add the keys to
+                               different places for me, in place so when we have credits come in we can use them instantly").
+                               Each Max, Ultra or Team plan's monthly API credit lands in one Console organization, only a key
+                               from that organization spends it, and it expires each month; one key per organization:
+               console-team              ANTHROPIC_API_KEY_CONSOLE_TEAM
+               console-hello-ultra       ANTHROPIC_API_KEY_CONSOLE_HELLO_ULTRA
+               console-nueydaddy         ANTHROPIC_API_KEY_CONSOLE_NUEYDADDY
+               console-agents-ultra      ANTHROPIC_API_KEY_CONSOLE_AGENTS_ULTRA
+               console-routines-ultra    ANTHROPIC_API_KEY_CONSOLE_ROUTINES_ULTRA
+               console-test-ultra        ANTHROPIC_API_KEY_CONSOLE_TEST_ULTRA
+               console-maintenance-ultra ANTHROPIC_API_KEY_CONSOLE_MAINTENANCE_ULTRA
+               console-workers-ultra     ANTHROPIC_API_KEY_CONSOLE_WORKERS_ULTRA
+                               A key whose organization has no credit yet ends on a credit-balance error and the next key runs;
+                               an empty secret (no key saved yet) is skipped.
+            9. console-work    work Console API key (ANTHROPIC_API_KEY_CONSOLE_WORK), monthly API credits
+           10. console         personal Console API key (ANTHROPIC_API_KEY_CONSOLE), last of the API keys, before team; its monthly
+                               API credits do not touch his personal plan's usage, so it stays (Narathip, 2026-11-19)
+           11. team            team account token, the FURRINGLINE Team seat (CLAUDE_CODE_OAUTH_TOKEN_WORK), only while
                                its plan has room
-            2. work            work account token, the work account's own Max plan (CLAUDE_CODE_OAUTH_TOKEN_WORKMAX,
+           12. work            work account token, the work account's own Max plan (CLAUDE_CODE_OAUTH_TOKEN_WORKMAX,
                                added 2026-10-25), only while its plan has room; weekly-limit tier only
-            3. hello-team      hello@furringline.com's Premium seat in the FURRINGLINE Team (CLAUDE_CODE_OAUTH_TOKEN_HELLO_TEAM,
+           13. hello-team      hello@furringline.com's Premium seat in the FURRINGLINE Team (CLAUDE_CODE_OAUTH_TOKEN_HELLO_TEAM,
                                added 2026-11-18), only while its plan has room
-            4. hello-ultra     hello@furringline.com's own Ultra plan (CLAUDE_CODE_OAUTH_TOKEN_HELLO_ULTRA, added 2026-11-18),
+           14. hello-ultra     hello@furringline.com's own Ultra plan (CLAUDE_CODE_OAUTH_TOKEN_HELLO_ULTRA, added 2026-11-18),
                                only while its plan has room
-            5. nueydaddy       the NueyDaddy account's own Ultra plan (CLAUDE_CODE_OAUTH_TOKEN_NUEYDADDY, added 2026-11-18),
+           15. nueydaddy       the NueyDaddy account's own Ultra plan (CLAUDE_CODE_OAUTH_TOKEN_NUEYDADDY, added 2026-11-18),
                                only while its plan has room
-            6. agents-team     the agents account's Premium seat in the FURRINGLINE Team (CLAUDE_CODE_OAUTH_TOKEN_AGENTS_TEAM,
+           16. agents-team     the agents account's Premium seat in the FURRINGLINE Team (CLAUDE_CODE_OAUTH_TOKEN_AGENTS_TEAM,
                                added 2026-11-18), only while its plan has room
-            7. agents-ultra    the agents account's own Ultra plan (CLAUDE_CODE_OAUTH_TOKEN_AGENTS_ULTRA, added 2026-11-18),
+           17. agents-ultra    the agents account's own Ultra plan (CLAUDE_CODE_OAUTH_TOKEN_AGENTS_ULTRA, added 2026-11-18),
                                only while its plan has room
-            8. console-work    work Console API key (ANTHROPIC_API_KEY_CONSOLE_WORK), monthly API credits
-            9. console         personal Console API key (ANTHROPIC_API_KEY_CONSOLE), last; its monthly API credits do not touch
-                               his personal plan's usage, so it stays (Narathip, 2026-11-19)
+           18 to 25. the routines, test, maintenance and workers accounts (routines@, test@, maintenance@ and
+                               workers@furringline.com; added 2026-11-24), each only while its plan has room. A -team key is the
+                               account's Premium seat in the FURRINGLINE Team, a -ultra key the account's own Ultra plan:
+               routines-team             CLAUDE_CODE_OAUTH_TOKEN_ROUTINES_TEAM
+               routines-ultra            CLAUDE_CODE_OAUTH_TOKEN_ROUTINES_ULTRA
+               test-team                 CLAUDE_CODE_OAUTH_TOKEN_TEST_TEAM
+               test-ultra                CLAUDE_CODE_OAUTH_TOKEN_TEST_ULTRA
+               maintenance-team          CLAUDE_CODE_OAUTH_TOKEN_MAINTENANCE_TEAM
+               maintenance-ultra         CLAUDE_CODE_OAUTH_TOKEN_MAINTENANCE_ULTRA
+               workers-team              CLAUDE_CODE_OAUTH_TOKEN_WORKERS_TEAM
+               workers-ultra             CLAUDE_CODE_OAUTH_TOKEN_WORKERS_ULTRA
           A key whose secret is empty or missing is skipped with a note, so the chain works before every secret is set.
 
           Never the personal plan (Narathip, 2026-11-19, record usage-and-accounts): his personal Claude plan is out of every
@@ -1065,6 +1109,9 @@ jobs:
           import urllib.error
           import urllib.request
 
+          # The plan accounts' Console organizations, in chain order (2026-11-24); each key is console-<name>,
+          # its secret ANTHROPIC_API_KEY_CONSOLE_<NAME>.
+          CONSOLE_ORGS = ("team", "hello-ultra", "nueydaddy", "agents-ultra", "routines-ultra", "test-ultra", "maintenance-ultra", "workers-ultra")
           KEYS = {
               "team": {"env": "CLAUDE_CODE_OAUTH_TOKEN_WORK", "kind": "plan", "check": "room"},
               "work": {"env": "CLAUDE_CODE_OAUTH_TOKEN_WORKMAX", "kind": "plan", "check": "room"},
@@ -1073,14 +1120,36 @@ jobs:
               "nueydaddy": {"env": "CLAUDE_CODE_OAUTH_TOKEN_NUEYDADDY", "kind": "plan", "check": "room"},
               "agents-team": {"env": "CLAUDE_CODE_OAUTH_TOKEN_AGENTS_TEAM", "kind": "plan", "check": "room"},
               "agents-ultra": {"env": "CLAUDE_CODE_OAUTH_TOKEN_AGENTS_ULTRA", "kind": "plan", "check": "room"},
+              "routines-team": {"env": "CLAUDE_CODE_OAUTH_TOKEN_ROUTINES_TEAM", "kind": "plan", "check": "room"},
+              "routines-ultra": {"env": "CLAUDE_CODE_OAUTH_TOKEN_ROUTINES_ULTRA", "kind": "plan", "check": "room"},
+              "test-team": {"env": "CLAUDE_CODE_OAUTH_TOKEN_TEST_TEAM", "kind": "plan", "check": "room"},
+              "test-ultra": {"env": "CLAUDE_CODE_OAUTH_TOKEN_TEST_ULTRA", "kind": "plan", "check": "room"},
+              "maintenance-team": {"env": "CLAUDE_CODE_OAUTH_TOKEN_MAINTENANCE_TEAM", "kind": "plan", "check": "room"},
+              "maintenance-ultra": {"env": "CLAUDE_CODE_OAUTH_TOKEN_MAINTENANCE_ULTRA", "kind": "plan", "check": "room"},
+              "workers-team": {"env": "CLAUDE_CODE_OAUTH_TOKEN_WORKERS_TEAM", "kind": "plan", "check": "room"},
+              "workers-ultra": {"env": "CLAUDE_CODE_OAUTH_TOKEN_WORKERS_ULTRA", "kind": "plan", "check": "room"},
+              "console-team": {"env": "ANTHROPIC_API_KEY_CONSOLE_TEAM", "kind": "api", "check": ""},
+              "console-hello-ultra": {"env": "ANTHROPIC_API_KEY_CONSOLE_HELLO_ULTRA", "kind": "api", "check": ""},
+              "console-nueydaddy": {"env": "ANTHROPIC_API_KEY_CONSOLE_NUEYDADDY", "kind": "api", "check": ""},
+              "console-agents-ultra": {"env": "ANTHROPIC_API_KEY_CONSOLE_AGENTS_ULTRA", "kind": "api", "check": ""},
+              "console-routines-ultra": {"env": "ANTHROPIC_API_KEY_CONSOLE_ROUTINES_ULTRA", "kind": "api", "check": ""},
+              "console-test-ultra": {"env": "ANTHROPIC_API_KEY_CONSOLE_TEST_ULTRA", "kind": "api", "check": ""},
+              "console-maintenance-ultra": {"env": "ANTHROPIC_API_KEY_CONSOLE_MAINTENANCE_ULTRA", "kind": "api", "check": ""},
+              "console-workers-ultra": {"env": "ANTHROPIC_API_KEY_CONSOLE_WORKERS_ULTRA", "kind": "api", "check": ""},
               "console-work": {"env": "ANTHROPIC_API_KEY_CONSOLE_WORK", "kind": "api", "check": ""},
               "console": {"env": "ANTHROPIC_API_KEY_CONSOLE", "kind": "api", "check": ""},
           }
-          DEFAULT_CHAIN = "team,work,hello-team,hello-ultra,nueydaddy,agents-team,agents-ultra,console-work,console"
+          # API keys first (Narathip, 2026-11-24: "ok change it to api keys first"): API credit can be spent only through an API
+          # key and is lost at the end of each month, while plan usage serves every other job. Personal's key is the last API key.
+          DEFAULT_CHAIN = (",".join(f"console-{n}" for n in CONSOLE_ORGS) + ",console-work,console,"
+                           + "team,work,hello-team,hello-ultra,nueydaddy,agents-team,agents-ultra,"
+                           "routines-team,routines-ultra,test-team,test-ultra,maintenance-team,maintenance-ultra,"
+                           "workers-team,workers-ultra")
           OLD_NAMES = {"work": "team", "workmax": "work"}  # before 2026-10-25
           KEY_VARS = {"CLAUDE_CODE_OAUTH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN_WORK", "CLAUDE_CODE_OAUTH_TOKEN_WORKMAX",
                       "CLAUDE_CODE_OAUTH_TOKEN_HELLO_TEAM", "CLAUDE_CODE_OAUTH_TOKEN_HELLO_ULTRA", "CLAUDE_CODE_OAUTH_TOKEN_NUEYDADDY",
                       "CLAUDE_CODE_OAUTH_TOKEN_AGENTS_TEAM", "CLAUDE_CODE_OAUTH_TOKEN_AGENTS_ULTRA", "ANTHROPIC_API_KEY", "ANTHROPIC_API_KEY_CONSOLE", "ANTHROPIC_API_KEY_CONSOLE_WORK", "ANTHROPIC_AUTH_TOKEN"}
+          KEY_VARS |= {e["env"] for e in KEYS.values()}  # every Console key slot and every plan key added 2026-11-24
           FALL_BACK = re.compile(r"usage limit|hit your limit|limit reached|limit will reset|quota|rate.?limit|credit balance"
                                  r"|\b40[13]\b|unauthori[sz]ed|authenticat|oauth|invalid (api key|token|bearer|x-api-key)"
                                  r"|token (has )?expired|/login|not logged in|forbidden|billing", re.I)
@@ -1103,7 +1172,11 @@ jobs:
           EXTRA_ON_CAP = 0.97               # the cap of a plan key whose meter does not say extra usage is off
           ACCOUNTS = {"team": "team", "work": "work", "hello-team": "hello-team", "hello-ultra": "hello-ultra",
                       "nueydaddy": "nueydaddy", "agents-team": "agents-team", "agents-ultra": "agents-ultra",
+                      "routines-team": "routines-team", "routines-ultra": "routines-ultra", "test-team": "test-team",
+                      "test-ultra": "test-ultra", "maintenance-team": "maintenance-team",
+                      "maintenance-ultra": "maintenance-ultra", "workers-team": "workers-team", "workers-ultra": "workers-ultra",
                       "console-work": "console", "console": "console"}
+          ACCOUNTS.update({f"console-{n}": "console" for n in CONSOLE_ORGS})  # the cost log's `key` names the organization
           NO_EXTRA = "dropped, the GitHub reviewer and fix agents never use extra usage"
           PERSONAL_ENV = "CLAUDE_CODE_OAUTH_TOKEN"   # in GitHub Actions, the personal plan token's secret
           NO_PERSONAL = "dropped, the GitHub reviewer and fix agents never use the personal plan"
@@ -1360,7 +1433,7 @@ jobs:
                   **tok, "cost_reported_usd": round(cost, 6) if isinstance(cost, (int, float)) else None,
                   "cost_priced_usd": priced(mu), "turns": res.get("num_turns"), "duration_ms": res.get("duration_ms"),
                   "is_error": bool(res.get("is_error")), "subtype": str(res.get("subtype") or "")[:40] or None,
-                  "tried": [t.split(":")[0][:40] for t in tried][:9] + [entry["name"][:40]],
+                  "tried": [t.split(":")[0][:40] for t in tried][:20] + [entry["name"][:40]],
               }
 
 
@@ -1537,6 +1610,22 @@ jobs:
           CLAUDE_CODE_OAUTH_TOKEN_NUEYDADDY: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN_NUEYDADDY }}
           CLAUDE_CODE_OAUTH_TOKEN_AGENTS_TEAM: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN_AGENTS_TEAM }}
           CLAUDE_CODE_OAUTH_TOKEN_AGENTS_ULTRA: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN_AGENTS_ULTRA }}
+          CLAUDE_CODE_OAUTH_TOKEN_ROUTINES_TEAM: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN_ROUTINES_TEAM }}
+          CLAUDE_CODE_OAUTH_TOKEN_ROUTINES_ULTRA: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN_ROUTINES_ULTRA }}
+          CLAUDE_CODE_OAUTH_TOKEN_TEST_TEAM: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN_TEST_TEAM }}
+          CLAUDE_CODE_OAUTH_TOKEN_TEST_ULTRA: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN_TEST_ULTRA }}
+          CLAUDE_CODE_OAUTH_TOKEN_MAINTENANCE_TEAM: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN_MAINTENANCE_TEAM }}
+          CLAUDE_CODE_OAUTH_TOKEN_MAINTENANCE_ULTRA: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN_MAINTENANCE_ULTRA }}
+          CLAUDE_CODE_OAUTH_TOKEN_WORKERS_TEAM: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN_WORKERS_TEAM }}
+          CLAUDE_CODE_OAUTH_TOKEN_WORKERS_ULTRA: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN_WORKERS_ULTRA }}
+          ANTHROPIC_API_KEY_CONSOLE_TEAM: ${{ secrets.ANTHROPIC_API_KEY_CONSOLE_TEAM }}
+          ANTHROPIC_API_KEY_CONSOLE_HELLO_ULTRA: ${{ secrets.ANTHROPIC_API_KEY_CONSOLE_HELLO_ULTRA }}
+          ANTHROPIC_API_KEY_CONSOLE_NUEYDADDY: ${{ secrets.ANTHROPIC_API_KEY_CONSOLE_NUEYDADDY }}
+          ANTHROPIC_API_KEY_CONSOLE_AGENTS_ULTRA: ${{ secrets.ANTHROPIC_API_KEY_CONSOLE_AGENTS_ULTRA }}
+          ANTHROPIC_API_KEY_CONSOLE_ROUTINES_ULTRA: ${{ secrets.ANTHROPIC_API_KEY_CONSOLE_ROUTINES_ULTRA }}
+          ANTHROPIC_API_KEY_CONSOLE_TEST_ULTRA: ${{ secrets.ANTHROPIC_API_KEY_CONSOLE_TEST_ULTRA }}
+          ANTHROPIC_API_KEY_CONSOLE_MAINTENANCE_ULTRA: ${{ secrets.ANTHROPIC_API_KEY_CONSOLE_MAINTENANCE_ULTRA }}
+          ANTHROPIC_API_KEY_CONSOLE_WORKERS_ULTRA: ${{ secrets.ANTHROPIC_API_KEY_CONSOLE_WORKERS_ULTRA }}
           ANTHROPIC_API_KEY_CONSOLE_WORK: ${{ secrets.ANTHROPIC_API_KEY_CONSOLE_WORK }}
           ANTHROPIC_API_KEY_CONSOLE: ${{ secrets.ANTHROPIC_API_KEY_CONSOLE }}
           CLAUDE_KEY_CHAIN: ${{ vars.CLAUDE_KEY_CHAIN }}
@@ -1705,7 +1794,7 @@ jobs:
               verdict, lines = "skip", [f"Skipped: {env.get('REASON')}. No Claude usage."]
           elif env.get("MISSING_TOKEN") == "true":
               verdict, lines = "fail", ["**Could not review:** this repository has no `CLAUDE_CODE_OAUTH_TOKEN_WORK`, "
-                                        "`CLAUDE_CODE_OAUTH_TOKEN_WORKMAX`, `CLAUDE_CODE_OAUTH_TOKEN_HELLO_TEAM`, `CLAUDE_CODE_OAUTH_TOKEN_HELLO_ULTRA`, `CLAUDE_CODE_OAUTH_TOKEN_NUEYDADDY`, `CLAUDE_CODE_OAUTH_TOKEN_AGENTS_TEAM`, `CLAUDE_CODE_OAUTH_TOKEN_AGENTS_ULTRA`, `ANTHROPIC_API_KEY_CONSOLE_WORK` or `ANTHROPIC_API_KEY_CONSOLE` Actions secret. Set it (nuey-skills `scripts/second-reviewer/set-secrets.sh`), then re-run this job."]
+                                        "`CLAUDE_CODE_OAUTH_TOKEN_WORKMAX`, `CLAUDE_CODE_OAUTH_TOKEN_HELLO_TEAM`, `CLAUDE_CODE_OAUTH_TOKEN_HELLO_ULTRA`, `CLAUDE_CODE_OAUTH_TOKEN_NUEYDADDY`, `CLAUDE_CODE_OAUTH_TOKEN_AGENTS_TEAM`, `CLAUDE_CODE_OAUTH_TOKEN_AGENTS_ULTRA`, `CLAUDE_CODE_OAUTH_TOKEN_ROUTINES_TEAM`, `CLAUDE_CODE_OAUTH_TOKEN_ROUTINES_ULTRA`, `CLAUDE_CODE_OAUTH_TOKEN_TEST_TEAM`, `CLAUDE_CODE_OAUTH_TOKEN_TEST_ULTRA`, `CLAUDE_CODE_OAUTH_TOKEN_MAINTENANCE_TEAM`, `CLAUDE_CODE_OAUTH_TOKEN_MAINTENANCE_ULTRA`, `CLAUDE_CODE_OAUTH_TOKEN_WORKERS_TEAM`, `CLAUDE_CODE_OAUTH_TOKEN_WORKERS_ULTRA`, `ANTHROPIC_API_KEY_CONSOLE_WORK`, `ANTHROPIC_API_KEY_CONSOLE` or `ANTHROPIC_API_KEY_CONSOLE_<org>` Actions secret. Set it (nuey-skills `scripts/second-reviewer/set-secrets.sh`), then re-run this job."]
           else:
               if env.get("CODE") != "false" and env.get("CODE_MODE") == "reuse":
                   runs.append(("code", "pass", [reused], {}, None, ""))
